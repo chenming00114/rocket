@@ -66,6 +66,24 @@ class IndexSelectedMatrix:
             col_length=col_length,
         )
 
+    def __getitem__(self, key):
+        """Support slicing the IndexSelectedMatrix."""
+        if isinstance(key, slice):
+            row_key, col_key = key
+            new_row_indices = resolve_slice(row_key) if self.row_indices is not None else None
+            new_col_indices = resolve_slice(col_key) if self.col_indices is not None else None
+
+            return IndexSelectedMatrix(
+                condensed_matrix=self.condensed_matrix[key],
+                row_indices=new_row_indices,
+                col_indices=new_col_indices,
+                row_length=self.row_length,
+                col_length=self.col_length,
+                skip_validation=True,
+            )
+
+        raise NotImplementedError("Only 2D slicing is supported for IndexSelectedMatrix.")
+
     def __matmul__(self, other: np.ndarray | IndexSelectedMatrix) -> IndexSelectedMatrix:
         """Perform matrix multiplication with the given array."""
         if isinstance(other, np.ndarray):
@@ -75,7 +93,7 @@ class IndexSelectedMatrix:
                 assert self.col_length == other.shape[-2]
                 row_condensed_other = np.take(other, self.col_indices, axis=-2)
 
-            return Matrix(
+            return IndexSelectedMatrix(
                 condensed_matrix=self.condensed_matrix @ row_condensed_other,
                 row_indices=self.row_indices,
                 col_indices=None,
@@ -184,4 +202,8 @@ class IndexSelectedMatrix:
         return full_matrix
 
 
+class Matrix:
+    """Matrix that provides nominal matrix operations with IndexSelectedMatrix backend."""
 
+    def __init__(self):
+        """Construct a matrix with an array of IndexSelectedMatrix."""
