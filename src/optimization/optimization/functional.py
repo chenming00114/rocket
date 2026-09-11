@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from optimization.differentiation import IdentityMatrixEntry, Jacobian
+from optimization.linear_algebra.condensed_matrix import IndexSelectedMatrix, Matrix
 from optimization.linear_algebra.slice_utils import resolve_slice
 
 
@@ -124,19 +125,28 @@ class UnitedJacobian:
 
         return np.zeros(0) if result is None else result
 
-    def densify(self, col_size: int = None) -> np.ndarray:
-        """Materialize the united jacobian as a dense matrix."""
+    def to_matrix(self, col_size: int = None) -> Matrix:
+        """Convert stacked jacobians into a condensed Matrix of IndexSelectedMatrix blocks."""
         if self._is_horizontal:
-            # Build vertical densification of the un-transposed collection then transpose
-            return UnitedJacobian([jacobian.T for jacobian in self._jacobians], is_horizontal=False).densify(col_size).T
-
-        if not self._jacobians:
-            return np.zeros((0, 0 if col_size is None else col_size))
+            return UnitedJacobian([jacobian.T for jacobian in self._jacobians], is_horizontal=False).to_matrix(col_size).T
 
         if col_size is None:
             col_size = self._infer_col_size()
 
-        return np.vstack([self._densify_single(jacobian, col_size) for jacobian in self._jacobians])
+        if not self._jacobians:
+            return Matrix([], shape=(0, col_size))
+
+        total_rows = sum(jacobian.row_size for jacobian in self._jacobians)
+        blocks = []
+        row_offset = 0
+        for jacobian in self._jacobians:
+            blocks.append(_jacobian_as_index_selected(jacobian, row_offset, total_rows, col_size))
+            row_offset += jacobian.row_size
+        return Matrix(blocks, shape=(total_rows, col_size))
+
+    def densify(self, col_size: int = None) -> np.ndarray:
+        """Materialize the united jacobian as a dense matrix."""
+        return self.to_matrix(col_size).expand()
 
     def _infer_col_size(self) -> int:
         """Infer full column dimension from jacobian selections."""
@@ -148,24 +158,22 @@ class UnitedJacobian:
                 max_index = max(max_index, int(np.max(jacobian.selection_indices)))
         return max_index + 1 if max_index >= 0 else fallback
 
-    @staticmethod
-    def _densify_single(jacobian: Jacobian, col_size: int) -> np.ndarray:
-        """Expand a single jacobian into a dense row-block."""
-        if isinstance(jacobian.matrix, IdentityMatrixEntry):
-            dense = np.zeros((jacobian.row_size, col_size))
-            if jacobian.selection_indices is None:
-                eye_size = min(jacobian.row_size, col_size)
-                dense[:eye_size, :eye_size] = jacobian.matrix.scale * np.eye(eye_size)
-            else:
-                dense[:, jacobian.selection_indices] = jacobian.matrix.scale * np.eye(jacobian.row_size)
-            return dense
 
-        matrix = np.atleast_2d(jacobian.matrix)
-        if jacobian.selection_indices is None:
-            dense = np.zeros((matrix.shape[0], col_size))
-            dense[:, : matrix.shape[1]] = matrix
-            return dense
+def _jacobian_as_index_selected(
+    jacobian: Jacobian, row_offset: int, row_length: int, col_length: int
+) -> IndexSelectedMatrix:
+    """Lift a Jacobian into an IndexSelectedMatrix block with stacked row indices."""
+    row_indices = np.arange(row_offset, row_offset + jacobian.row_size)
+    if isinstance(jacobian.matrix, IdentityMatrixEntry):
+        condensed = jacobian.matrix.scale * np.eye(jacobian.matrix.dimension)
+    else:
+        condensed = np.atleast_2d(np.asarray(jacobian.matrix, dtype=float))
 
-        dense = np.zeros((matrix.shape[0], col_size))
-        dense[:, jacobian.selection_indices] = matrix
-        return dense
+    col_indices = None if jacobian.selection_indices is None else np.asarray(jacobian.selection_indices, dtype=int)
+    return IndexSelectedMatrix(
+        condensed_matrix=condensed,
+        row_indices=row_indices,
+        col_indices=col_indices,
+        row_length=row_length,
+        col_length=col_length,
+    )

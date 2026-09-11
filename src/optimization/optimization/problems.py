@@ -8,6 +8,7 @@ import numpy as np
 from optimization.constraints import BaseConstraint, Bounds, ConstraintKind, LinearConstraint
 from optimization.differentiation import IdentityMatrixEntry, Jacobian
 from optimization.functional import LinearMap, UnitedJacobian
+from optimization.linear_algebra.condensed_matrix import Matrix
 
 
 class BaseProblem(metaclass=ABCMeta):
@@ -186,14 +187,19 @@ class LinearProgram(BaseProblem):
             return np.zeros(0)
         return np.concatenate([np.atleast_1d(residual).reshape(-1) for residual in residuals_at_zero])
 
+    def get_standard_form_constraint_matrix(self) -> Matrix:
+        """Return condensed equality constraint matrix A for A @ x = b.
+
+        After ``LinearProgramStandardizer``, this is often a single dense block.
+        """
+        return self.get_equality_united_jacobian().to_matrix(self.variable_dimension)
+
     def get_standard_form_matrices(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return dense (A, b, c) for min c.T @ x s.t. A @ x = b.
 
         Linear maps are stored as A @ x + bias = 0, so b = -bias.
         """
-        col_size = self.variable_dimension
-        equality_jacobian = self.get_equality_united_jacobian()
-        matrix_a = equality_jacobian.densify(col_size)
+        matrix_a = self.get_standard_form_constraint_matrix().expand()
         vector_b = -self.get_equality_bias()
         vector_c = self.get_objective_gradient()
         return matrix_a, vector_b, vector_c
