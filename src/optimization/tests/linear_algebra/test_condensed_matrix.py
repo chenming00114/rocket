@@ -209,6 +209,19 @@ def test_index_selected_matrix_mul_routes_full_space_column_weights():
     assert np.allclose(local.condensed_matrix, np.asarray([[2.0, 6.0], [6.0, 12.0]]))
 
 
+def test_index_selected_matrix_scale_columns_uses_expanded_weights():
+    """Column scaling applies weights through col_indices."""
+    matrix = IndexSelectedMatrix(
+        condensed_matrix=np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+        row_indices=np.asarray([0, 1]),
+        col_indices=np.asarray([1, 3]),
+        row_length=2,
+        col_length=4,
+    )
+    scaled = matrix.scale_columns(np.asarray([10.0, 0.5, 7.0, 2.0]))
+    assert np.allclose(scaled.condensed_matrix, np.asarray([[0.5, 4.0], [1.5, 8.0]]))
+
+
 def test_matrix_blocks_property_is_immutable_snapshot():
     """blocks returns a copy so callers cannot mutate the live storage alias."""
     block = IndexSelectedMatrix(condensed_matrix=np.asarray([[1.0]]))
@@ -217,3 +230,17 @@ def test_matrix_blocks_property_is_immutable_snapshot():
     assert snapshot == (block,)
     with pytest.raises(TypeError):
         snapshot[0] = block
+
+
+def test_matrix_column_scaling_matches_dense():
+    """Matrix * column_weights matches dense column scaling."""
+    block = IndexSelectedMatrix(
+        condensed_matrix=np.asarray([[1.0, 2.0]]),
+        row_indices=np.asarray([0]),
+        col_indices=np.asarray([0, 2]),
+        row_length=1,
+        col_length=3,
+    )
+    matrix = Matrix([block], shape=(1, 3))
+    weights = np.asarray([2.0, 5.0, 3.0])
+    assert np.allclose((matrix * weights).expand(), matrix.expand() * weights)
