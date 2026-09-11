@@ -20,5 +20,5 @@ class LinearProgramSolution:
     # Convergence flag and iteration count
     converged: bool
     iterations: int
-    # Optional recovered original-space primal
-    original_primal: np.ndarray = None
+    # Recovered original-space primal (preferred over slacked-array prefix slicing)
+    original_primal: np.ndarray | None = None

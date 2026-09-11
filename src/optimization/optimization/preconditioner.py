@@ -37,24 +37,38 @@ class LinearProgramStandardizer:
 
     @property
     def unslacked_length(self) -> int:
-        """Provide original variable dimension before slack expansion."""
+        """Provide standardized core dimension before inequality slacks.
+
+        This is not the original-space dimension when free variables are split
+        or bounds are shifted. Use ``recover_original_primal`` for original x.
+        """
         if self._unslacked_length is None:
             self.standardize()
         return self._unslacked_length
 
+    @staticmethod
+    def _bound_vector(bound: np.ndarray | None, length: int, fill_value: float) -> np.ndarray:
+        """Broadcast a bound vector to ``length`` or fill with ``fill_value``."""
+        if bound is None:
+            return np.full(length, fill_value)
+        values = np.array(np.atleast_1d(bound), dtype=float)
+        if values.size == 1:
+            return np.full(length, values[0])
+        if values.size != length:
+            raise ValueError(f"Bound length {values.size} does not match variable dimension {length}.")
+        return values
+
     def standardize(self) -> LinearProgram:
-        """Construct the standard-form linear program."""
+        """Construct the standard-form linear program.
+
+        Free variables become ``y+ - y-``, upper-only bounds become ``x = ub - y``,
+        and boxed variables add the inequality ``(ub - lb) - y >= 0``.
+        """
         original = self._original
         n = original.variable_dimension
-        self._unslacked_length = n
 
-        lower = np.full(n, -np.inf)
-        upper = np.full(n, np.inf)
-        if original.bounds is not None:
-            if original.bounds.lower is not None:
-                lower = np.array(np.atleast_1d(original.bounds.lower), dtype=float)
-            if original.bounds.upper is not None:
-                upper = np.array(np.atleast_1d(original.bounds.upper), dtype=float)
+        lower = self._bound_vector(None if original.bounds is None else original.bounds.lower, n, -np.inf)
+        upper = self._bound_vector(None if original.bounds is None else original.bounds.upper, n, np.inf)
 
         offsets = np.zeros(n)
         columns: list[np.ndarray] = []
@@ -123,6 +137,7 @@ class LinearProgramStandardizer:
 
         inequality_slack_count = sum(np.atleast_2d(matrix).shape[0] for matrix, _ in inequality_blocks)
         total_vars = num_core + inequality_slack_count
+        self._unslacked_length = num_core
 
         full_objective = np.zeros((1, total_vars))
         full_objective[:, :num_core] = objective_matrix
@@ -162,7 +177,7 @@ class LinearProgramStandardizer:
 
         objective = LinearMap(matrix=full_objective, bias=objective_bias)
         bounds = Bounds(lower_bound=np.zeros(total_vars))
-        self._standard_problem = LinearProgram(objective, expanded_equalities, bounds=bounds)
+        self._standard_problem = LinearProgram(objective, expanded_equalities, bounds=bounds, variable_dimension=total_vars)
         return self._standard_problem
 
     def recover_original_primal(self, standardized_primal: np.ndarray) -> np.ndarray:

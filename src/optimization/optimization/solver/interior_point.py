@@ -14,7 +14,9 @@ class LinearProgramInteriorPointSolver:
     The solver logic considers a standard formed LP problem in form of
         min c.T @ x  s.t. A @ x = b, x ≥ 0
 
-    See `preconditioner` module for standardization logic
+    Direct use requires ``bounds.lower == 0`` and no upper bounds. General LPs
+    should go through ``LinearProgramStandardizer`` (or
+    ``solve_linear_program_interior_point_method``).
 
     Dual problem:
         max b.T @ y  s.t. A.T @ y + s = c, s ≥ 0
@@ -26,12 +28,11 @@ class LinearProgramInteriorPointSolver:
     """
 
     def __init__(self, problem: LinearProgram):
-        """Accept a linear programming problem and precondition."""
+        """Accept a standard-form linear program (equalities + x >= 0)."""
         self._problem = problem
-        # Assert the problem is in standard form
-        assert self._problem.inequality_total_dimension == 0, (
-            "The problem is not in standard form. Please precondition the problem first."
-        )
+        if self._problem.inequality_total_dimension != 0:
+            raise ValueError("The problem is not in standard form. Please precondition the problem first.")
+        self._validate_standard_form_bounds(self._problem.bounds)
 
         # Initialize the slack variable for the non-negativity constraint and the
         # lagrangian multipliers for the equality constraints
@@ -41,27 +42,39 @@ class LinearProgramInteriorPointSolver:
         self._matrix_a, self._vector_b, self._vector_c = self._problem.get_standard_form_matrices()
         self._num_constraints, self._num_variables = self._matrix_a.shape
 
+    @staticmethod
+    def _validate_standard_form_bounds(bounds) -> None:
+        """Require x >= 0 with no finite upper bounds for direct IPM use."""
+        if bounds is None or bounds.lower is None:
+            raise ValueError("Direct IPM use requires bounds.lower == 0; use LinearProgramStandardizer.")
+        lower = np.atleast_1d(np.asarray(bounds.lower, dtype=float))
+        if not np.allclose(lower, 0.0):
+            raise ValueError("Direct IPM use requires bounds.lower == 0; use LinearProgramStandardizer.")
+        if bounds.upper is not None:
+            raise ValueError("Direct IPM use does not accept upper bounds; use LinearProgramStandardizer.")
+
+    def _mehrotra_dual_slack(self, primal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Build (y, s) consistent with a given strictly positive primal x."""
+        matrix_a = self._matrix_a
+        vector_c = self._vector_c
+        gram = matrix_a @ matrix_a.T + 1e-8 * np.eye(matrix_a.shape[0])
+        dual = np.linalg.solve(gram, matrix_a @ vector_c)
+        slack = vector_c - matrix_a.T @ dual
+        slack = np.maximum(slack, 1.0)
+        slack_shift = max(0.0, 0.5 * (np.dot(primal, slack) / max(np.sum(primal), 1e-16) - np.min(slack)))
+        return dual, slack + slack_shift
+
     def _use_default_initial_guess(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Use a default initial guess for the optimization array."""
+        """Use a Mehrotra least-squares starting point for (x, y, s)."""
         matrix_a = self._matrix_a
         vector_b = self._vector_b
-        vector_c = self._vector_c
-
-        # Mehrotra starting point based on least-squares projections
         gram = matrix_a @ matrix_a.T + 1e-8 * np.eye(matrix_a.shape[0])
         primal_ls = matrix_a.T @ np.linalg.solve(gram, vector_b)
-        dual_ls = np.linalg.solve(gram, matrix_a @ vector_c)
-        slack_ls = vector_c - matrix_a.T @ dual_ls
-
         primal = np.maximum(primal_ls, 1.0)
-        slack = np.maximum(slack_ls, 1.0)
-
-        # Shift to reduce complementarity imbalance
+        dual, slack = self._mehrotra_dual_slack(primal)
         primal_shift = max(0.0, 0.5 * (np.dot(primal, slack) / max(np.sum(slack), 1e-16) - np.min(primal)))
-        slack_shift = max(0.0, 0.5 * (np.dot(primal, slack) / max(np.sum(primal), 1e-16) - np.min(slack)))
         primal = primal + primal_shift
-        slack = slack + slack_shift
-        return primal, dual_ls, slack
+        return primal, dual, slack
 
     def _compute_residuals(
         self, primal: np.ndarray, dual: np.ndarray, slack: np.ndarray
@@ -106,15 +119,23 @@ class LinearProgramInteriorPointSolver:
         return float(min(1.0, fraction * np.min(-variable[negative] / direction[negative])))
 
     def solve(self, initial_guess: np.ndarray = None, max_iterations: int = 100, rtol: float = 1e-8):
-        """Solve the linear programming problem."""
+        """Solve the linear programming problem.
+
+        ``initial_guess`` is the standard-form primal ``x`` only. Dual ``y`` and
+        slack ``s`` are built to be consistent with that ``x`` (Mehrotra
+        least-squares dual plus a positivity shift). Callers who need a full
+        ``(x, y, s)`` start should omit ``initial_guess`` or pass a primal that
+        already matches the desired complementarity structure.
+        """
         if initial_guess is None:
             primal, dual, slack = self._use_default_initial_guess()
         else:
             primal = np.array(initial_guess, dtype=float, copy=True)
-            assert primal.size == self._num_variables, "Initial guess dimension mismatch."
-            assert np.all(primal > 0), "Interior-point initial guess must be strictly positive."
-            _, dual, slack = self._use_default_initial_guess()
-            slack = np.maximum(slack, 1.0)
+            if primal.size != self._num_variables:
+                raise ValueError("Initial guess dimension mismatch.")
+            if not np.all(primal > 0):
+                raise ValueError("Interior-point initial guess must be strictly positive.")
+            dual, slack = self._mehrotra_dual_slack(primal)
 
         self._lagrangian_multipliers = dual
         self._slack_variable = slack
@@ -177,10 +198,9 @@ def solve_linear_program_interior_point_method(
 ) -> LinearProgramSolution:
     """Implement interior point method to solve linear program.
 
-    The solver logic considers a standard formed LP problem in form of
-    min c.T @ x  s.t. A @ x = b, x ≥ 0
+    The solver standardizes a general LP then solves min c.T @ x s.t. A @ x = b, x ≥ 0.
 
-    See `preconditioner` module for standardization logic
+    ``initial_guess``, when given, is the *standardized* primal only.
     """
     standardizer = LinearProgramStandardizer(problem)
     standard_problem = standardizer.standardize()

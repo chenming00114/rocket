@@ -91,14 +91,21 @@ def _full_dimension_from_jacobian(jacobian: Jacobian) -> int:
 class LinearProgram(BaseProblem):
     """Define a generic linear program with constraints and bounds."""
 
-    def __init__(self, objective: LinearMap, constraints: list[LinearConstraint] = None, bounds: Bounds = None):
+    def __init__(
+        self,
+        objective: LinearMap,
+        constraints: list[LinearConstraint] = None,
+        bounds: Bounds = None,
+        variable_dimension: int | None = None,
+    ):
         """Construct with predefined linear constraints and objective."""
-        # Check the objective output to be size 1
-        assert objective.output_size == 1, "Linear cost must be a scalar"
+        if objective.output_size != 1:
+            raise ValueError("Linear cost must be a scalar")
 
         self._objective = objective
         self._constraints = constraints or []
         self.bounds = bounds
+        self._explicit_variable_dimension = variable_dimension
         super().__init__()
 
     @property
@@ -108,18 +115,34 @@ class LinearProgram(BaseProblem):
 
     @property
     def variable_dimension(self) -> int:
-        """Provide the full primal variable dimension."""
+        """Provide the full primal variable dimension.
+
+        An explicit constructor dimension is preferred. Otherwise the value is
+        inferred from jacobians (including sparse ``selection_indices``) and
+        bounds length. Bounds shorter than the inferred full space are rejected.
+        """
+        if self._explicit_variable_dimension is not None:
+            return self._explicit_variable_dimension
+
         dimensions = [_full_dimension_from_jacobian(self._objective.jacobian)]
-        dummy = np.zeros(max(dimensions))
+        dummy = np.zeros(1)
         for constraint in self._constraints:
             for jacobian in constraint.eval_jacobians(dummy):
                 dimensions.append(_full_dimension_from_jacobian(jacobian))
+        inferred = max(dimensions)
+
         if self.bounds is not None:
+            bound_sizes = []
             if self.bounds.upper is not None:
-                dimensions.append(np.atleast_1d(self.bounds.upper).size)
+                bound_sizes.append(np.atleast_1d(self.bounds.upper).size)
             if self.bounds.lower is not None:
-                dimensions.append(np.atleast_1d(self.bounds.lower).size)
-        return max(dimensions)
+                bound_sizes.append(np.atleast_1d(self.bounds.lower).size)
+            if bound_sizes:
+                bound_dim = max(bound_sizes)
+                if bound_dim != 1 and bound_dim < inferred:
+                    raise ValueError(f"Bounds length {bound_dim} is smaller than inferred variable dimension {inferred}.")
+                inferred = max(inferred, bound_dim)
+        return inferred
 
     def eval_objective(self, optimization_array: np.ndarray) -> float:
         """Evaluate the objective function given the current optimization array."""

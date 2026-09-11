@@ -1,6 +1,7 @@
 """Test interior point linear program solver."""
 
 import numpy as np
+import pytest
 
 from optimization.constraints import Bounds, ConstraintKind, LinearConstraint
 from optimization.differentiation import Jacobian
@@ -52,3 +53,80 @@ def test_standard_form_solver_matches_dense_kkt_feasibility(factory_linear_progr
     solution = LinearProgramInteriorPointSolver(standard).solve(rtol=1e-10)
     matrix_a, vector_b, _ = standard.get_standard_form_matrices()
     assert np.linalg.norm(matrix_a @ solution.primal - vector_b) < 1e-6
+
+
+def test_initial_guess_keeps_user_primal_and_builds_consistent_dual():
+    """User primal is retained; dual/slack are built from that x, not a silent Mehrotra rebuild of x."""
+    objective = LinearMap(matrix=np.asarray([[-1.0, -1.0]]), bias=0.0)
+    equality = LinearConstraint.from_single_jacobian_bias(
+        Jacobian(matrix=np.asarray([[1.0, 1.0]])),
+        bias=np.asarray([-1.0]),
+        constraint_kind=ConstraintKind.EQUALITY,
+    )
+    problem = LinearProgram(objective, [equality], bounds=Bounds(lower_bound=np.zeros(2)))
+    solver = LinearProgramInteriorPointSolver(problem)
+    guess = np.asarray([0.25, 0.75])
+    solution = solver.solve(initial_guess=guess, max_iterations=0)
+    assert np.allclose(solution.primal, guess)
+    assert solution.slack is not None and np.all(solution.slack > 0)
+    assert solution.dual is not None
+
+
+def test_direct_solver_rejects_upper_bounds():
+    """Direct IPM use is standard form only: lower == 0 and no upper bounds."""
+    objective = LinearMap(matrix=np.asarray([[-1.0, -1.0]]), bias=0.0)
+    equality = LinearConstraint.from_single_jacobian_bias(
+        Jacobian(matrix=np.asarray([[1.0, 1.0]])),
+        bias=np.asarray([-1.0]),
+        constraint_kind=ConstraintKind.EQUALITY,
+    )
+    boxed = LinearProgram(objective, [equality], bounds=Bounds(lower_bound=np.zeros(2), upper_bound=np.ones(2)))
+    with pytest.raises(ValueError, match="upper bounds"):
+        LinearProgramInteriorPointSolver(boxed)
+
+
+def test_solve_free_upper_and_boxed_bound_programs():
+    """Standardizer+IPM recovers optima for free, upper-only, and boxed variables."""
+    free = LinearProgram(
+        LinearMap(matrix=np.asarray([[1.0]]), bias=0.0),
+        [
+            LinearConstraint.from_single_jacobian_bias(
+                Jacobian(matrix=np.asarray([[1.0]])),
+                bias=np.asarray([-2.0]),
+                constraint_kind=ConstraintKind.EQUALITY,
+            )
+        ],
+    )
+    free_solution = solve_linear_program_interior_point_method(free, rtol=1e-8)
+    assert free_solution.converged
+    assert np.allclose(free_solution.original_primal, np.asarray([2.0]), atol=1e-4)
+
+    upper_only = LinearProgram(
+        LinearMap(matrix=np.asarray([[-1.0]]), bias=0.0),
+        [
+            LinearConstraint.from_single_jacobian_bias(
+                Jacobian(matrix=np.asarray([[1.0]])),
+                bias=np.asarray([-1.0]),
+                constraint_kind=ConstraintKind.EQUALITY,
+            )
+        ],
+        bounds=Bounds(upper_bound=np.asarray([5.0])),
+    )
+    upper_solution = solve_linear_program_interior_point_method(upper_only, rtol=1e-8)
+    assert upper_solution.converged
+    assert np.allclose(upper_solution.original_primal, np.asarray([1.0]), atol=1e-4)
+
+    boxed = LinearProgram(
+        LinearMap(matrix=np.asarray([[1.0]]), bias=0.0),
+        [
+            LinearConstraint.from_single_jacobian_bias(
+                Jacobian(matrix=np.asarray([[1.0]])),
+                bias=np.asarray([-1.0]),
+                constraint_kind=ConstraintKind.EQUALITY,
+            )
+        ],
+        bounds=Bounds(lower_bound=np.asarray([0.0]), upper_bound=np.asarray([5.0])),
+    )
+    boxed_solution = solve_linear_program_interior_point_method(boxed, rtol=1e-8)
+    assert boxed_solution.converged
+    assert np.allclose(boxed_solution.original_primal, np.asarray([1.0]), atol=1e-4)
