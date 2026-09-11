@@ -1,6 +1,7 @@
 """Test united jacobian aggregation helpers."""
 
 import numpy as np
+import pytest
 
 from optimization.differentiation import Jacobian
 from optimization.functional import UnitedJacobian
@@ -31,3 +32,13 @@ def test_united_jacobian_transpose_matmul():
     result = united.T @ dual
     expected = np.asarray([1.0 + 3.0, 0.0, 2.0 + 4.0])
     assert np.allclose(result, expected)
+
+
+def test_united_jacobian_jacobians_property_is_immutable_snapshot():
+    """jacobians returns a copy so callers cannot mutate the live storage alias."""
+    jacobian = Jacobian(matrix=np.asarray([[1.0, 2.0]]))
+    united = UnitedJacobian([jacobian])
+    snapshot = united.jacobians
+    assert snapshot == (jacobian,)
+    with pytest.raises(TypeError):
+        snapshot[0] = jacobian

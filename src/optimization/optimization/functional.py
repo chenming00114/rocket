@@ -72,9 +72,9 @@ class UnitedJacobian:
         self._is_horizontal = is_horizontal
 
     @property
-    def jacobians(self) -> list[Jacobian]:
-        """Provide the stored jacobian collection."""
-        return self._jacobians
+    def jacobians(self) -> tuple[Jacobian, ...]:
+        """Provide the stored jacobian collection as an immutable snapshot."""
+        return tuple(self._jacobians)
 
     @property
     def T(self) -> "UnitedJacobian":
