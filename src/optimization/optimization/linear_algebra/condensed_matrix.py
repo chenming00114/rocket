@@ -1,5 +1,8 @@
 """Define arrays with selected indices for efficient linear algebra operations."""
 
+from __future__ import annotations
+
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,17 +10,35 @@ import numpy as np
 from optimization.linear_algebra.slice_utils import SliceType, resolve_slice
 
 
+def _as_index_array(key, length: int) -> np.ndarray:
+    """Resolve a numpy-style index key into an explicit index array."""
+    if isinstance(key, slice):
+        return np.arange(*key.indices(length))
+    if isinstance(key, (int, np.integer)):
+        return np.asarray([key if key >= 0 else length + key], dtype=int)
+    return np.atleast_1d(np.asarray(key, dtype=int))
+
+
 @dataclass(frozen=True)
 class IndexSelectedMatrix:
-    """Define a matrix with selected indices."""
+    """Define a matrix with selected indices.
+
+    ``row_indices`` / ``col_indices`` are stored in ascending order. Construction
+    sorts them (and permutes ``condensed_matrix``) when needed so the sorted-index
+    intersection merge in ``__matmul__`` stays valid. Unsorted
+    ``Jacobian(selection_indices=...)`` inputs are normalized here.
+    """
+
+    # Defer ndarray ufuncs so __rmatmul__ is honored for ndarray @ IndexSelectedMatrix
+    __array_ufunc__ = None
 
     # Condensed array post-selection, shall be treated as a 2D array
     condensed_matrix: np.ndarray
 
-    # Define output size of the full variable array in ascending order
+    # Full-space row indices for condensed rows (ascending)
     row_indices: np.ndarray = None
 
-    # Define input size of the full variable array in ascending order
+    # Full-space column indices for condensed columns (ascending)
     col_indices: np.ndarray = None
 
     row_length: int = None
@@ -27,7 +48,29 @@ class IndexSelectedMatrix:
     skip_validation: bool = False
 
     def __post_init__(self):
-        """Validate the input array and selection indices."""
+        """Validate inputs and normalize selection indices to ascending order."""
+        condensed = np.atleast_2d(np.asarray(self.condensed_matrix, dtype=float))
+
+        row_indices = None if self.row_indices is None else np.asarray(self.row_indices, dtype=int).reshape(-1)
+        col_indices = None if self.col_indices is None else np.asarray(self.col_indices, dtype=int).reshape(-1)
+
+        # Sorted-index contract: intersection merge in __matmul__ assumes ascending indices.
+        if row_indices is not None:
+            order = np.argsort(row_indices, kind="mergesort")
+            if np.any(order != np.arange(order.size)):
+                row_indices = row_indices[order]
+                condensed = condensed[order, :]
+            object.__setattr__(self, "row_indices", row_indices)
+
+        if col_indices is not None:
+            order = np.argsort(col_indices, kind="mergesort")
+            if np.any(order != np.arange(order.size)):
+                col_indices = col_indices[order]
+                condensed = condensed[:, order]
+            object.__setattr__(self, "col_indices", col_indices)
+
+        object.__setattr__(self, "condensed_matrix", condensed)
+
         if self.skip_validation:
             return
 
@@ -39,13 +82,13 @@ class IndexSelectedMatrix:
         if self.row_length is not None and self.row_indices is not None:
             if len(self.row_indices) != self.condensed_matrix.shape[0]:
                 raise ValueError("Row indices length must match the condensed matrix row size.")
-            if self.row_length < max(self.row_indices) + 1:
+            if len(self.row_indices) and self.row_length < max(self.row_indices) + 1:
                 raise ValueError("Row length must be greater than the maximum row index.")
 
         if self.col_length is not None and self.col_indices is not None:
             if len(self.col_indices) != self.condensed_matrix.shape[1]:
                 raise ValueError("Column indices length must match the condensed matrix column size.")
-            if self.col_length < max(self.col_indices) + 1:
+            if len(self.col_indices) and self.col_length < max(self.col_indices) + 1:
                 raise ValueError("Column length must be greater than the maximum column index.")
 
     @classmethod
@@ -68,24 +111,31 @@ class IndexSelectedMatrix:
 
     def __getitem__(self, key):
         """Support slicing the IndexSelectedMatrix."""
-        if isinstance(key, slice):
-            row_key, col_key = key
-            new_row_indices = resolve_slice(row_key) if self.row_indices is not None else None
-            new_col_indices = resolve_slice(col_key) if self.col_indices is not None else None
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise NotImplementedError("Only 2D slicing is supported for IndexSelectedMatrix.")
 
-            return IndexSelectedMatrix(
-                condensed_matrix=self.condensed_matrix[key],
-                row_indices=new_row_indices,
-                col_indices=new_col_indices,
-                row_length=self.row_length,
-                col_length=self.col_length,
-                skip_validation=True,
-            )
+        row_key, col_key = key
+        row_idx = _as_index_array(row_key, self.condensed_matrix.shape[0])
+        col_idx = _as_index_array(col_key, self.condensed_matrix.shape[1])
 
-        raise NotImplementedError("Only 2D slicing is supported for IndexSelectedMatrix.")
+        new_row_indices = self.row_indices[row_idx] if self.row_indices is not None else None
+        new_col_indices = self.col_indices[col_idx] if self.col_indices is not None else None
 
-    def __matmul__(self, other: np.ndarray | IndexSelectedMatrix) -> IndexSelectedMatrix:
-        """Perform matrix multiplication with the given array."""
+        return IndexSelectedMatrix(
+            condensed_matrix=self.condensed_matrix[np.ix_(row_idx, col_idx)],
+            row_indices=new_row_indices,
+            col_indices=new_col_indices,
+            row_length=self.row_length,
+            col_length=self.col_length,
+            skip_validation=True,
+        )
+
+    def __matmul__(self, other: np.ndarray | "IndexSelectedMatrix") -> "IndexSelectedMatrix":
+        """Perform matrix multiplication with the given array.
+
+        For 1D ndarray operands, ``np.atleast_2d`` treats the vector as a single
+        row. Pass an explicit column ``(n, 1)`` (or use ``Matrix``) for ``A @ x``.
+        """
         if isinstance(other, np.ndarray):
             other = np.atleast_2d(other)
             row_condensed_other = other
@@ -103,36 +153,35 @@ class IndexSelectedMatrix:
             )
 
         if isinstance(other, IndexSelectedMatrix):
-            row_indices_to_take, col_indices_to_take = None, None
             if self.col_length is not None and other.row_length is not None:
                 assert self.col_length == other.row_length
 
+            # Intersection merge only when BOTH connecting index sets are set.
+            # Asymmetric products (one side dense/None) select into the dense operand.
             if self.col_indices is not None and other.row_indices is not None:
                 row_indices_to_take, col_indices_to_take = [], []
                 row_idx, col_idx = 0, 0
-
                 while row_idx < len(other.row_indices) and col_idx < len(self.col_indices):
                     row_el_idx = other.row_indices[row_idx]
                     col_el_idx = self.col_indices[col_idx]
                     if row_el_idx == col_el_idx:
                         row_indices_to_take.append(row_idx)
                         col_indices_to_take.append(col_idx)
-
                     if row_el_idx <= col_el_idx:
                         row_idx += 1
                     if row_el_idx >= col_el_idx:
                         col_idx += 1
-
-            col_condensed_self = (
-                self.condensed_matrix
-                if col_indices_to_take is None
-                else np.take(self.condensed_matrix, col_indices_to_take, axis=-1)
-            )
-            row_condensed_other = (
-                other.condensed_matrix
-                if row_indices_to_take is None
-                else np.take(other.condensed_matrix, row_indices_to_take, axis=-2)
-            )
+                col_condensed_self = np.take(self.condensed_matrix, col_indices_to_take, axis=-1)
+                row_condensed_other = np.take(other.condensed_matrix, row_indices_to_take, axis=-2)
+            elif self.col_indices is not None:
+                col_condensed_self = self.condensed_matrix
+                row_condensed_other = np.take(other.condensed_matrix, self.col_indices, axis=-2)
+            elif other.row_indices is not None:
+                col_condensed_self = np.take(self.condensed_matrix, other.row_indices, axis=-1)
+                row_condensed_other = other.condensed_matrix
+            else:
+                col_condensed_self = self.condensed_matrix
+                row_condensed_other = other.condensed_matrix
 
             result = col_condensed_self @ row_condensed_other
             return IndexSelectedMatrix(
@@ -146,14 +195,14 @@ class IndexSelectedMatrix:
 
         raise NotImplementedError("Unsupported type for matrix multiplication.")
 
-    def __rmatmul__(self, other: np.ndarray) -> IndexSelectedMatrix:
+    def __rmatmul__(self, other: np.ndarray) -> "IndexSelectedMatrix":
         """Perform right matrix multiplication with the given array."""
         if isinstance(other, np.ndarray):
             other = np.atleast_2d(other)
             col_condensed_other = other
-            if self.col_indices is not None:
-                assert self.col_length == other.shape[-2]
-                col_condensed_other = np.take(other, self.col_indices, axis=-2)
+            if self.row_indices is not None:
+                assert self.row_length == other.shape[-1]
+                col_condensed_other = np.take(other, self.row_indices, axis=-1)
 
             result = col_condensed_other @ self.condensed_matrix
             return IndexSelectedMatrix(
@@ -167,11 +216,93 @@ class IndexSelectedMatrix:
 
         raise NotImplementedError("Unsupported type for right matrix multiplication.")
 
+    def __mul__(self, other: float | int | np.ndarray) -> "IndexSelectedMatrix":
+        """Scale by a scalar, full-space column weights, or condensed-width weights.
+
+        1D weights matching ``col_length`` are applied via ``scale_columns``.
+        1D weights matching the condensed column count are applied elementwise on
+        the condensed matrix only.
+        """
+        if isinstance(other, (float, int, np.floating, np.integer)):
+            return IndexSelectedMatrix(
+                condensed_matrix=self.condensed_matrix * float(other),
+                row_indices=self.row_indices,
+                col_indices=self.col_indices,
+                row_length=self.row_length,
+                col_length=self.col_length,
+                skip_validation=True,
+            )
+
+        weights = np.asarray(other, dtype=float)
+        if weights.ndim == 0:
+            return self.__mul__(float(weights))
+        if weights.ndim != 1:
+            raise NotImplementedError("Unsupported type for matrix scaling.")
+
+        if self.col_length is not None and weights.shape[0] == self.col_length:
+            return self.scale_columns(weights)
+        if weights.shape[0] == self.condensed_matrix.shape[1]:
+            return IndexSelectedMatrix(
+                condensed_matrix=self.condensed_matrix * weights.reshape(1, -1),
+                row_indices=self.row_indices,
+                col_indices=self.col_indices,
+                row_length=self.row_length,
+                col_length=self.col_length,
+                skip_validation=True,
+            )
+        raise ValueError("Weight dimension must match col_length or condensed column count.")
+
+    def __rmul__(self, other: float | int | np.ndarray) -> "IndexSelectedMatrix":
+        """Scale by a scalar or column weights (see ``__mul__``)."""
+        return self.__mul__(other)
+
+    def scale_columns(self, column_weights: np.ndarray) -> "IndexSelectedMatrix":
+        """Scale columns by weights defined on the expanded column space."""
+        weights = np.atleast_1d(np.asarray(column_weights, dtype=float))
+        if self.col_indices is None:
+            expected = self.col_length if self.col_length is not None else self.condensed_matrix.shape[1]
+            if weights.shape[0] != expected:
+                raise ValueError("Column weight dimension mismatch.")
+            local = weights[: self.condensed_matrix.shape[1]]
+        else:
+            if self.col_length is None or weights.shape[0] != self.col_length:
+                raise ValueError("Column weight dimension mismatch.")
+            local = weights[self.col_indices]
+        return IndexSelectedMatrix(
+            condensed_matrix=self.condensed_matrix * local.reshape(1, -1),
+            row_indices=self.row_indices,
+            col_indices=self.col_indices,
+            row_length=self.row_length,
+            col_length=self.col_length,
+            skip_validation=True,
+        )
+
+    def __add__(self, other: "IndexSelectedMatrix") -> "IndexSelectedMatrix":
+        """Add two index-selected matrices in the expanded sense."""
+        if not isinstance(other, IndexSelectedMatrix):
+            raise NotImplementedError("Unsupported type for matrix addition.")
+
+        if self.row_length is not None and other.row_length is not None:
+            assert self.row_length == other.row_length
+        if self.col_length is not None and other.col_length is not None:
+            assert self.col_length == other.col_length
+
+        return IndexSelectedMatrix(
+            condensed_matrix=self.expand() + other.expand(),
+            row_indices=None,
+            col_indices=None,
+            row_length=self.row_length or other.row_length,
+            col_length=self.col_length or other.col_length,
+            skip_validation=True,
+        )
+
     @property
     def shape(self):
         """Return the shape of the appearant matrix."""
-        if self.row_length is not None and self.col_length is not None:
-            return self.row_length, self.col_length
+        row_dim = self.row_length if self.row_length is not None else self.condensed_matrix.shape[0]
+        col_dim = self.col_length if self.col_length is not None else self.condensed_matrix.shape[1]
+        if self.row_length is not None or self.col_length is not None:
+            return row_dim, col_dim
         return self.condensed_matrix.shape
 
     @property
@@ -189,21 +320,142 @@ class IndexSelectedMatrix:
     def expand(self) -> np.ndarray:
         """Expand the condensed matrix into the full matrix based on the selection indices."""
         if self.row_indices is None and self.col_indices is None:
-            return self.condensed_matrix
+            return np.array(self.condensed_matrix, copy=True)
 
-        full_matrix = np.zeros((self.row_length, self.col_length))
+        row_length = self.row_length if self.row_length is not None else self.condensed_matrix.shape[0]
+        col_length = self.col_length if self.col_length is not None else self.condensed_matrix.shape[1]
+        full_matrix = np.zeros((row_length, col_length))
         row_indices = self.row_indices if self.row_indices is not None else np.arange(self.condensed_matrix.shape[0])
         col_indices = self.col_indices if self.col_indices is not None else np.arange(self.condensed_matrix.shape[1])
 
-        for i, row_idx in enumerate(row_indices):
-            for j, col_idx in enumerate(col_indices):
-                full_matrix[row_idx, col_idx] = self.condensed_matrix[i, j]
-
+        full_matrix[np.ix_(row_indices, col_indices)] = self.condensed_matrix
         return full_matrix
 
 
 class Matrix:
     """Matrix that provides nominal matrix operations with IndexSelectedMatrix backend."""
 
-    def __init__(self):
+    def __init__(self, blocks: list[IndexSelectedMatrix] = None, shape: tuple[int, int] = None):
         """Construct a matrix with an array of IndexSelectedMatrix."""
+        self._blocks = list(blocks or [])
+        if shape is not None:
+            self._shape = shape
+        elif self._blocks:
+            row_lengths = {block.row_length for block in self._blocks if block.row_length is not None}
+            col_lengths = {block.col_length for block in self._blocks if block.col_length is not None}
+            assert len(row_lengths) <= 1 and len(col_lengths) <= 1, "Inconsistent block full-matrix shapes."
+            row_length = (
+                next(iter(row_lengths)) if row_lengths else max(block.condensed_matrix.shape[0] for block in self._blocks)
+            )
+            col_length = (
+                next(iter(col_lengths)) if col_lengths else max(block.condensed_matrix.shape[1] for block in self._blocks)
+            )
+            self._shape = (row_length, col_length)
+        else:
+            self._shape = (0, 0)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Return the shape of the appearant matrix."""
+        return self._shape
+
+    @property
+    def T(self) -> "Matrix":
+        """Return the transpose of the matrix."""
+        return Matrix([block.T for block in self._blocks], shape=(self._shape[1], self._shape[0]))
+
+    def add_block(self, block: IndexSelectedMatrix):
+        """Append an IndexSelectedMatrix block to the matrix."""
+        if block.row_length is not None:
+            assert block.row_length == self._shape[0], "Block row length mismatch."
+        if block.col_length is not None:
+            assert block.col_length == self._shape[1], "Block column length mismatch."
+        self._blocks.append(block)
+
+    def scale_columns(self, column_weights: np.ndarray) -> "Matrix":
+        """Scale every block's columns by expanded-space weights."""
+        weights = np.atleast_1d(np.asarray(column_weights, dtype=float))
+        if weights.shape[0] != self._shape[1]:
+            raise ValueError("Column weight dimension mismatch.")
+        return Matrix([block.scale_columns(weights) for block in self._blocks], shape=self._shape)
+
+    def __mul__(self, other: float | int | np.ndarray) -> "Matrix":
+        """Scale by a scalar or by expanded column weights."""
+        if isinstance(other, (float, int, np.floating, np.integer)):
+            return Matrix([block * float(other) for block in self._blocks], shape=self._shape)
+
+        weights = np.asarray(other, dtype=float)
+        if weights.ndim == 1:
+            return self.scale_columns(weights)
+        raise NotImplementedError("Unsupported type for matrix scaling.")
+
+    def __rmul__(self, other: float | int | np.ndarray) -> "Matrix":
+        """Scale by a scalar or by expanded column weights."""
+        return self.__mul__(other)
+
+    @property
+    def blocks(self) -> tuple[IndexSelectedMatrix, ...]:
+        """Provide the stored IndexSelectedMatrix blocks as an immutable snapshot."""
+        return tuple(self._blocks)
+
+    def __matmul__(self, other: np.ndarray | IndexSelectedMatrix | "Matrix") -> np.ndarray | IndexSelectedMatrix | "Matrix":
+        """Perform matrix multiplication by accumulating block contributions."""
+        if isinstance(other, Matrix):
+            return Matrix(
+                [left @ right for left in self._blocks for right in other._blocks],
+                shape=(self._shape[0], other._shape[1]),
+            )
+
+        if isinstance(other, IndexSelectedMatrix):
+            result_blocks = [block @ other for block in self._blocks]
+            return Matrix(result_blocks, shape=(self._shape[0], other.shape[1]))
+
+        other_array = np.atleast_1d(other)
+        if other_array.ndim == 1:
+            assert other_array.shape[0] == self._shape[1], "Incompatible matmul dimensions."
+            result = np.zeros(self._shape[0])
+            for block in self._blocks:
+                product = block @ other_array.reshape(-1, 1)
+                contrib = np.asarray(product.condensed_matrix).reshape(-1)
+                if product.row_indices is None:
+                    result[: contrib.size] += contrib
+                else:
+                    result[product.row_indices] += contrib
+            return result
+
+        other_array = np.atleast_2d(other_array)
+        assert other_array.shape[-2] == self._shape[1], "Incompatible matmul dimensions."
+        result = np.zeros((self._shape[0], other_array.shape[-1]))
+        for block in self._blocks:
+            product = block @ other_array
+            contrib = np.atleast_2d(product.condensed_matrix)
+            if product.row_indices is None:
+                result[: contrib.shape[0], :] += contrib
+            else:
+                result[product.row_indices, :] += contrib
+        return result
+
+    def __rmatmul__(self, other: np.ndarray) -> np.ndarray:
+        """Perform right matrix multiplication with a dense array."""
+        other_array = np.atleast_2d(other)
+        assert other_array.shape[-1] == self._shape[0], "Incompatible matmul dimensions."
+        result = np.zeros((other_array.shape[0], self._shape[1]))
+        for block in self._blocks:
+            product = other_array @ block
+            contrib = np.atleast_2d(product.condensed_matrix)
+            if product.col_indices is None:
+                result[:, : contrib.shape[1]] += contrib
+            else:
+                result[:, product.col_indices] += contrib
+        return result
+
+    def expand(self) -> np.ndarray:
+        """Expand all blocks into a dense matrix."""
+        full_matrix = np.zeros(self._shape)
+        for block in self._blocks:
+            full_matrix += (
+                block.expand()
+                if (block.row_indices is not None or block.col_indices is not None)
+                else block.condensed_matrix
+            )
+        return full_matrix
