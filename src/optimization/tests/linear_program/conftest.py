@@ -1,14 +1,15 @@
 """Create test linear programing problem."""
 
 import numpy as np
+import pytest
 
-from optimization.constraints import ConstraintKind, LinearConstraint
+from optimization.constraints import Bounds, ConstraintKind, LinearConstraint
 from optimization.differentiation import Jacobian
 from optimization.functional import LinearMap
-from optimization.problems import BaseProblem
+from optimization.problems import LinearProgram
 
 
-class ExampleConstrainedLinearProgram(BaseProblem):
+class ExampleConstrainedLinearProgram(LinearProgram):
     """Define an example linear program with constraints and bounds for solver testing.
 
     Factory Production Planning Linear Programming Problem
@@ -40,39 +41,35 @@ class ExampleConstrainedLinearProgram(BaseProblem):
         min [-40, -30] @ x
         s.t.
             [[-2 -1], [-1, -2]] @ x + [60, 80] ≥ 0
-            [1, 1] @ x = 0
+            [1, 1] @ x - 40 = 0
             x ≥ 0
     """
 
     def __init__(self):
         """Construct with predefined constraints and objective."""
-        self.objective = LinearMap(matrix=np.asarray([-40, -30]), bias=0.0)
+        objective = LinearMap(matrix=np.asarray([[-40.0, -30.0]]), bias=0.0)
 
-        # Construct the linear inequality constraint jacobian
-        inequality_jacobian = Jacobian(matrix=np.asarray([[-2, -1], [-1, -2]]))
+        # Construct the linear inequality constraint jacobian (satisfied when >= 0)
+        inequality_jacobian = Jacobian(matrix=np.asarray([[-2.0, -1.0], [-1.0, -2.0]]))
         # Construct the linear equality constraint jacobian
-        equality_jacobian = Jacobian(matrix=np.asarray([1, 1]))
-        self._constraints = [
+        equality_jacobian = Jacobian(matrix=np.asarray([[1.0, 1.0]]))
+        constraints = [
             LinearConstraint.from_single_jacobian_bias(
                 jacobian=inequality_jacobian,
-                bias=np.asarray([-60, -80]),
+                bias=np.asarray([60.0, 80.0]),
                 constraint_kind=ConstraintKind.INEQUALITY_ABOVE,
             ),
             LinearConstraint.from_single_jacobian_bias(
                 jacobian=equality_jacobian,
-                bias=np.asarray(0.0),
+                bias=np.asarray([-40.0]),
                 constraint_kind=ConstraintKind.EQUALITY,
             ),
         ]
+        bounds = Bounds(lower_bound=np.zeros(2))
+        super().__init__(objective=objective, constraints=constraints, bounds=bounds)
 
-    @property
-    def constraints(self) -> list[LinearConstraint]:
-        """Provide all constraints of the problem."""
-        return self._constraints
 
-    def eval_objective(self, optimization_array):
-        """Evaluate objective function."""
-        return self.objective.evaluate_with(optimization_array)
-
-    def eval_lagrangian_gradient(self, optimization_array):
-        """Compute lagrangian gradient."""
+@pytest.fixture
+def factory_linear_program():
+    """Provide the factory planning example linear program."""
+    return ExampleConstrainedLinearProgram()
