@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from optimization.linear_algebra.condensed_matrix import Matrix
 from optimization.preconditioner import LinearProgramStandardizer
 from optimization.problems import LinearProgram
 from optimization.solver.array_store import SlackedOptimizationArray
@@ -17,6 +18,12 @@ class LinearProgramInteriorPointSolver:
     Direct use requires ``bounds.lower == 0`` and no upper bounds. General LPs
     should go through ``LinearProgramStandardizer`` (or
     ``solve_linear_program_interior_point_method``).
+
+    The Newton path uses condensed ``Matrix`` / ``IndexSelectedMatrix`` *operator
+    products* for ``A`` and ``(A D) A.T`` assembly. This is not a sparse KKT
+    factorization: the reduced normal matrix is still ``.expand()`` + dense
+    ``np.linalg.solve``. After ``standardize()``, ``A`` is often one dense block
+    because the standardizer currently densifies equality/inequality maps.
 
     Dual problem:
         max b.T @ y  s.t. A.T @ y + s = c, s ≥ 0
@@ -39,8 +46,16 @@ class LinearProgramInteriorPointSolver:
         self._lagrangian_multipliers = None
         self._slack_variable = None
 
-        self._matrix_a, self._vector_b, self._vector_c = self._problem.get_standard_form_matrices()
+        # Keep A in condensed IndexSelectedMatrix blocks; densify only for small KKT normals
+        self._matrix_a: Matrix = self._problem.get_standard_form_constraint_matrix()
+        self._vector_b = -self._problem.get_equality_bias()
+        self._vector_c = self._problem.get_objective_gradient()
         self._num_constraints, self._num_variables = self._matrix_a.shape
+
+    @property
+    def constraint_matrix(self) -> Matrix:
+        """Provide the condensed equality operator A used by the Newton path."""
+        return self._matrix_a
 
     @staticmethod
     def _validate_standard_form_bounds(bounds) -> None:
@@ -57,7 +72,7 @@ class LinearProgramInteriorPointSolver:
         """Build (y, s) consistent with a given strictly positive primal x."""
         matrix_a = self._matrix_a
         vector_c = self._vector_c
-        gram = matrix_a @ matrix_a.T + 1e-8 * np.eye(matrix_a.shape[0])
+        gram = (matrix_a @ matrix_a.T).expand() + 1e-8 * np.eye(matrix_a.shape[0])
         dual = np.linalg.solve(gram, matrix_a @ vector_c)
         slack = vector_c - matrix_a.T @ dual
         slack = np.maximum(slack, 1.0)
@@ -68,7 +83,7 @@ class LinearProgramInteriorPointSolver:
         """Use a Mehrotra least-squares starting point for (x, y, s)."""
         matrix_a = self._matrix_a
         vector_b = self._vector_b
-        gram = matrix_a @ matrix_a.T + 1e-8 * np.eye(matrix_a.shape[0])
+        gram = (matrix_a @ matrix_a.T).expand() + 1e-8 * np.eye(matrix_a.shape[0])
         primal_ls = matrix_a.T @ np.linalg.solve(gram, vector_b)
         primal = np.maximum(primal_ls, 1.0)
         dual, slack = self._mehrotra_dual_slack(primal)
@@ -102,7 +117,8 @@ class LinearProgramInteriorPointSolver:
         #   S dx + X ds = -(X S e - target)
         r_comp = primal * slack - complementarity_target
         rhs_dx_partial = -r_comp + primal * stationarity_res
-        normal_matrix = (self._matrix_a * (primal / slack)) @ self._matrix_a.T
+        # Normal equations assemble as (A D) A.T with D = diag(x / s) via column scaling
+        normal_matrix = (self._matrix_a * (primal / slack) @ self._matrix_a.T).expand()
         normal_matrix = normal_matrix + 1e-12 * np.eye(normal_matrix.shape[0])
         rhs_dual = -primal_feasibility_res - self._matrix_a @ (rhs_dx_partial / slack)
         delta_dual = np.linalg.solve(normal_matrix, rhs_dual)

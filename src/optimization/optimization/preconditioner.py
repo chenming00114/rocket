@@ -17,6 +17,12 @@ class LinearProgramStandardizer:
     and construct an alternative LP problem in the standard form while tracking
     conversion between the standardized problem and the original problem.
         min c.T @ x  s.t. A @ x = b, x ≥ 0
+
+    Sparsity limitation: constraint maps are densified when remapping into
+    standard form, so ``A`` is typically one dense block after
+    standardize-then-IPM. Condensed selection is preserved end-to-end only for
+    already-standard problems whose jacobians carry ``selection_indices``.
+    A sparse-aware standardizer is a follow-up.
     """
 
     def __init__(self, problem: LinearProgram):
