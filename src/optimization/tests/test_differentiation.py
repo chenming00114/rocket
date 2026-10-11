@@ -57,4 +57,4 @@ def test_empty_hessians_from_jacobian():
     empty_hessians = HessiansForJacobian.empty_from_jacobian(jacobian)
     assert all(hessian.matrix == IdentityMatrixEntry(0, empty_hessians.dimension) for hessian in empty_hessians.row_matrices)
     assert empty_hessians.dimension == jacobian.matrix.shape[1]
-    assert empty_hessians.selection_indices == jacobian.selection_indices
+    assert np.array_equal(empty_hessians.selection_indices, jacobian.selection_indices)
