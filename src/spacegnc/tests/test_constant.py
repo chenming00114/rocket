@@ -48,3 +48,22 @@ def test_constants_with_scaler(with_example_scaler, example_constant_provider):
     assert np.isclose(example_constant_provider.MU_E, 1)
     assert np.isclose(example_constant_provider.GC, 1)
     assert np.isclose(example_constant_provider.RADIUS_E, 1.0004273)
+
+
+def test_universal_constants_loaded_from_data_file():
+    """Test universal constants are parsed from the package data file with units."""
+    from spacegnc.constant import MU_E as LOADED_MU_E, OMEGA_E as LOADED_OMEGA_E, RADIUS_E as LOADED_RADIUS_E
+
+    assert np.isclose(LOADED_MU_E.m_as("m^3/s^2"), MU_E.m)
+    assert np.isclose(LOADED_RADIUS_E.m_as("km"), 6378.137)
+    assert np.isclose(LOADED_OMEGA_E.m_as("rad/s"), 7.2921159e-5)
+
+
+def test_invalid_constant_definition_raises(tmp_path):
+    """Test a malformed constant definition line is rejected instead of executed."""
+    from spacegnc.constant import parse_constants_from_file
+
+    bad_file = tmp_path / "bad_constants"
+    bad_file.write_text("MU_E = __import__('os').getcwd()\n")
+    with pytest.raises(ValueError):
+        parse_constants_from_file(bad_file)
