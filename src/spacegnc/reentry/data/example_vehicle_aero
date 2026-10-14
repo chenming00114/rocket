@@ -1,0 +1,13 @@
+# EXAMPLE vehicle aerodynamics, NOT data for any real vehicle.
+# Fixed trim angle of attack schedule, L/D ~1.0 hypersonic and ~0.7 subsonic.
+# Coefficients are held constant outside the Mach range.
+# mach    C_L     C_D
+0.5       0.30    0.42
+1.2       0.34    0.47
+2.0       0.37    0.44
+3.0       0.39    0.42
+5.0       0.40    0.41
+8.0       0.41    0.41
+12.0      0.42    0.415
+20.0      0.42    0.415
+35.0      0.42    0.415
