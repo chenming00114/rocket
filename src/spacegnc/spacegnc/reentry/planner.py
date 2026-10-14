@@ -18,8 +18,8 @@ from scipy.ndimage import uniform_filter1d
 from scipy.optimize import brentq, minimize
 
 from spacegnc.logconfig import create_logger
-from reentry.scenario import KeepOutZone
-from reentry.simulation import BankReversalSimulator
+from spacegnc.reentry.scenario import KeepOutZone
+from spacegnc.reentry.simulation import BankReversalSimulator
 
 LOG = create_logger(__name__)
 
