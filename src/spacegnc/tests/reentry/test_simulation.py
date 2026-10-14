@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from reentry.scenario import ReentryScenario
-from reentry.simulation import TERMINAL_ENERGY_STATUS, BankReversalSimulator
+from spacegnc.reentry.scenario import ReentryScenario
+from spacegnc.reentry.simulation import TERMINAL_ENERGY_STATUS, BankReversalSimulator
 
 
 def test_reversal_simulation_reaches_terminal_energy():

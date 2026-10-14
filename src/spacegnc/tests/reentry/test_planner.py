@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from reentry.planner import ArcProfile, BankReversalPlanner, reduced_arc_chain, side_label, zone_passages
-from reentry.scenario import KeepOutZone, ReentryScenario
+from spacegnc.reentry.planner import ArcProfile, BankReversalPlanner, reduced_arc_chain, side_label, zone_passages
+from spacegnc.reentry.scenario import KeepOutZone, ReentryScenario
 
 
 def make_profile(curvature: float = 2e-7, total_range: float = 1.0e6) -> ArcProfile:

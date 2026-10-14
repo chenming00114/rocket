@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Circle
 
-from reentry.planner import ArcPrimitives, ArcProfile, ReversalPlan
-from reentry.scenario import KeepOutZone
-from reentry.shooting import MEGAJOULE, ShootingResult
+from spacegnc.reentry.planner import ArcPrimitives, ArcProfile, ReversalPlan
+from spacegnc.reentry.scenario import KeepOutZone
+from spacegnc.reentry.shooting import MEGAJOULE, ShootingResult
 
 KILOMETER = 1e3
 

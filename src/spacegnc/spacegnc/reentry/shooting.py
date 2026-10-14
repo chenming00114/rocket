@@ -5,9 +5,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from spacegnc.logconfig import create_logger
-from reentry.planner import ReversalPlan, ZonePassage, zone_passages
-from reentry.scenario import KeepOutZone
-from reentry.simulation import BankReversalSimulator, EntryTrajectory
+from spacegnc.reentry.planner import ReversalPlan, ZonePassage, zone_passages
+from spacegnc.reentry.scenario import KeepOutZone
+from spacegnc.reentry.simulation import BankReversalSimulator, EntryTrajectory
 
 LOG = create_logger(__name__)
 

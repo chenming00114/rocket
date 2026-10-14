@@ -2,7 +2,7 @@
 
 Arc primitives -> side assignments -> reduced reversal plans -> full 3DOF shooting -> plots and summary.
 
-    python -m reentry.run_reentry --output-dir reentry_output
+    python -m spacegnc.reentry.run_reentry --output-dir reentry_output
 """
 
 import argparse
@@ -13,11 +13,17 @@ from pathlib import Path
 import numpy as np
 
 from spacegnc.logconfig import create_logger
-from reentry.planner import ArcPrimitives, BankReversalPlanner
-from reentry.plotting import plot_arc_primitives, plot_convergence, plot_energy_windows, plot_ground_track, plot_profiles
-from reentry.scenario import ReentryScenario
-from reentry.shooting import MEGAJOULE, shoot
-from reentry.simulation import BankReversalSimulator
+from spacegnc.reentry.planner import ArcPrimitives, BankReversalPlanner
+from spacegnc.reentry.plotting import (
+    plot_arc_primitives,
+    plot_convergence,
+    plot_energy_windows,
+    plot_ground_track,
+    plot_profiles,
+)
+from spacegnc.reentry.scenario import ReentryScenario
+from spacegnc.reentry.shooting import MEGAJOULE, shoot
+from spacegnc.reentry.simulation import BankReversalSimulator
 
 LOG = create_logger(__name__)
 
