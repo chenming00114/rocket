@@ -2,7 +2,8 @@
 
 Arc primitives -> side assignments -> reduced reversal plans -> full 3DOF shooting -> plots and summary.
 The lp planner replaces the side assignment enumeration with sequential LPs on a relaxed bank sign, and
-the predictor-corrector guidance replaces planning and shooting with closed-loop next reversal solves.
+the predictor-corrector guidance replaces planning and shooting with closed-loop next reversal solves,
+corrected by a 3DOF terminal bias prediction every --prediction-interval cycles unless --no-bias-correction.
 
     python -m spacegnc.reentry.run_reentry --output-dir reentry_output [--planner lp|predictor-corrector]
 """
@@ -41,7 +42,13 @@ LINEAR_PROGRAM_PLANNER = "lp"
 PREDICTOR_CORRECTOR_PLANNER = "predictor-corrector"
 
 
-def run_case(scenario: ReentryScenario, output_dir: Path, planner_kind: str = ENUMERATION_PLANNER) -> dict:
+def run_case(
+    scenario: ReentryScenario,
+    output_dir: Path,
+    planner_kind: str = ENUMERATION_PLANNER,
+    bias_correction: bool = True,
+    prediction_interval: int = 1,
+) -> dict:
     """Plan, shoot and plot the scenario with the chosen planner, returning the run summary."""
     start_time = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -72,7 +79,9 @@ def run_case(scenario: ReentryScenario, output_dir: Path, planner_kind: str = EN
     LOG.info(f"|sigma| from S(e_f) = {RANGE_MARGIN}|X0|: {initial_bank_deg:.2f} deg")
 
     if planner_kind == PREDICTOR_CORRECTOR_PLANNER:
-        return fly_closed_loop(scenario, simulator, primitives, initial_bank_deg, output_dir, start_time)
+        return fly_closed_loop(
+            scenario, simulator, primitives, initial_bank_deg, output_dir, start_time, bias_correction, prediction_interval
+        )
 
     planning_start_time = time.time()
     if planner_kind == LINEAR_PROGRAM_PLANNER:
@@ -174,10 +183,18 @@ def fly_closed_loop(
     initial_bank_deg: float,
     output_dir: Path,
     start_time: float,
+    bias_correction: bool = True,
+    prediction_interval: int = 1,
 ) -> dict:
     """Fly the predictor-corrector guidance in closed loop, plot and summarize it."""
     guidance_start_time = time.time()
-    guidance = PredictorCorrectorGuidance(primitives, scenario.keep_out_zones, scenario.clearance_margin)
+    guidance = PredictorCorrectorGuidance(
+        primitives,
+        scenario.keep_out_zones,
+        scenario.clearance_margin,
+        bias_correction=bias_correction,
+        prediction_interval=prediction_interval,
+    )
     result = guidance.fly(simulator, initial_bank_deg)
     guidance_time = time.time() - guidance_start_time
     trajectory = result.trajectory
@@ -185,7 +202,7 @@ def fly_closed_loop(
         f"Predictor-corrector: {len(result.commands)} cycles, d0={result.initial_sign:+d}, "
         f"e_k={np.round(result.reversal_energies / MEGAJOULE, 3)} MJ/kg, miss={np.round(result.miss, 3)} km, "
         f"clearances={[round(float(passage.clearance) / 1e3, 1) for passage in result.passages]} km, "
-        f"status={trajectory.status} ({guidance_time:.1f} s)"
+        f"status={trajectory.status}, 3DOF predictions={result.predictions} ({guidance_time:.1f} s)"
     )
 
     zones = sorted(scenario.keep_out_zones, key=lambda zone: zone.downrange)
@@ -203,6 +220,11 @@ def fly_closed_loop(
             "N": int(result.reversal_energies.size),
             "d0": result.initial_sign,
             "guidance_cycles": len(result.commands),
+            "bias_correction": bias_correction,
+            "prediction_interval": prediction_interval,
+            "predictions_3dof": result.predictions,
+            "prediction_flight_time_s": result.prediction_flight_time_s,
+            "prediction_wall_time_s": result.prediction_wall_time_s,
             "final_bank_magnitude_deg": result.commands[-1].bank_magnitude_deg,
             "reversal_energies_mj_per_kg": list(result.reversal_energies / MEGAJOULE),
             "miss_km": list(result.miss),
@@ -232,8 +254,16 @@ def main():
         help="Reversal planner, side assignment enumeration, sequential LP on a relaxed bank sign or closed-loop "
         "predictor-corrector guidance",
     )
+    parser.add_argument(
+        "--no-bias-correction",
+        action="store_true",
+        help="Predictor-corrector without the 3DOF terminal bias correction, reduced model predictions only",
+    )
+    parser.add_argument(
+        "--prediction-interval", type=int, default=1, help="Guidance cycles M between predictor-corrector 3DOF predictions"
+    )
     args = parser.parse_args()
-    run_case(ReentryScenario(), args.output_dir, args.planner)
+    run_case(ReentryScenario(), args.output_dir, args.planner, not args.no_bias_correction, args.prediction_interval)
 
 
 if __name__ == "__main__":

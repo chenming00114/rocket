@@ -119,8 +119,51 @@ def shoot_and_record(name, simulator, scenario, plan, planning_time, planning_co
     )
 
 
-def benchmark_example(scenario: ReentryScenario) -> tuple[list[PlannerRecord], float]:
-    """Run every planner on the example scenario from shared arc primitives."""
+def fly_and_record(name, simulator, scenario, primitives, initial_bank_deg, prediction_interval) -> PlannerRecord:
+    """Fly the predictor-corrector in closed loop, with the 3DOF bias correction every M cycles unless M is None."""
+    start_time = time.time()
+    with count_evaluations(simulator) as counter:
+        guidance = PredictorCorrectorGuidance(
+            primitives,
+            scenario.keep_out_zones,
+            scenario.clearance_margin,
+            bias_correction=prediction_interval is not None,
+            prediction_interval=prediction_interval or 1,
+        )
+        result = guidance.fly(simulator, initial_bank_deg)
+    guidance_time = time.time() - start_time
+    # Guidance and 3DOF flight are interleaved, so the closed-loop time is booked as planning
+    min_clearance = min(passage.clearance for passage in result.passages)
+    return PlannerRecord(
+        planner=name,
+        sides=side_label([passage.side for passage in result.passages]),
+        reversal_count=int(result.reversal_energies.size),
+        bank_magnitude_deg=result.commands[-1].bank_magnitude_deg,
+        reversal_energies_mj_per_kg=list(result.reversal_energies / MEGAJOULE),
+        miss_km=float(np.linalg.norm(result.miss)),
+        min_clearance_km=min_clearance / KILOMETER,
+        works=bool(np.linalg.norm(result.miss) < 0.2 and min_clearance >= 0.0),
+        planning_time_s=guidance_time,
+        shooting_time_s=0.0,
+        planning_reduced_paths=counter.reduced_paths,
+        planning_integrations=counter.integrations,
+        shooting_integrations=0,
+        extra={
+            "guidance_cycles": len(result.commands),
+            "segments": result.integrations,
+            "predictions_3dof": result.predictions,
+            "prediction_flight_time_s": result.prediction_flight_time_s,
+            "prediction_wall_time_s": result.prediction_wall_time_s,
+            "status": result.trajectory.status,
+        },
+    )
+
+
+def benchmark_example(scenario: ReentryScenario, prediction_intervals=(1,)) -> tuple[list[PlannerRecord], float]:
+    """Run every planner on the example scenario from shared arc primitives.
+
+    The predictor-corrector flies once without the 3DOF bias correction and once per prediction interval M.
+    """
     frame = scenario.build_frame()
     initial_state = scenario.initial_state(frame)
     simulator = BankReversalSimulator(
@@ -162,31 +205,9 @@ def benchmark_example(scenario: ReentryScenario) -> tuple[list[PlannerRecord], f
     }
     records.append(shoot_and_record("lp", simulator, scenario, lp_plan.plan, time.time() - start_time, counter, extra))
 
-    start_time = time.time()
-    with count_evaluations(simulator) as counter:
-        guidance = PredictorCorrectorGuidance(primitives, scenario.keep_out_zones, scenario.clearance_margin)
-        result = guidance.fly(simulator, initial_bank_deg)
-    guidance_time = time.time() - start_time
-    # Guidance and 3DOF flight are interleaved, so the closed-loop time is booked as planning
-    min_clearance = min(passage.clearance for passage in result.passages)
-    records.append(
-        PlannerRecord(
-            planner="predictor-corrector",
-            sides=side_label([passage.side for passage in result.passages]),
-            reversal_count=int(result.reversal_energies.size),
-            bank_magnitude_deg=result.commands[-1].bank_magnitude_deg,
-            reversal_energies_mj_per_kg=list(result.reversal_energies / MEGAJOULE),
-            miss_km=float(np.linalg.norm(result.miss)),
-            min_clearance_km=min_clearance / KILOMETER,
-            works=bool(np.linalg.norm(result.miss) < 0.2 and min_clearance >= 0.0),
-            planning_time_s=guidance_time,
-            shooting_time_s=0.0,
-            planning_reduced_paths=counter.reduced_paths,
-            planning_integrations=counter.integrations,
-            shooting_integrations=0,
-            extra={"guidance_cycles": len(result.commands), "status": result.trajectory.status},
-        )
-    )
+    for prediction_interval in [None, *prediction_intervals]:
+        name = "predictor-corrector" + ("" if prediction_interval is None else f" bias M={prediction_interval}")
+        records.append(fly_and_record(name, simulator, scenario, primitives, initial_bank_deg, prediction_interval))
     return records, primitives_time
 
 
@@ -228,8 +249,8 @@ def synthetic_zones(zone_count: int, total_range: float = 2.0e6) -> list[KeepOut
 def planner_scaling(zone_counts, energy_samples, cell_counts) -> list[dict]:
     """Planning wall time and reduced path count against m zones, samples and K cells.
 
-    The predictor-corrector row is the cost of one guidance cycle at entry, a closed-loop flight repeats it
-    once per cycle.
+    The predictor-corrector row is the cost of one reduced model guidance cycle at entry, a closed-loop
+    flight repeats it once per cycle. The 3DOF bias prediction needs the full dynamics and is not included.
     """
     rows = []
     for zone_count in zone_counts:
@@ -268,7 +289,7 @@ def planner_scaling(zone_counts, energy_samples, cell_counts) -> list[dict]:
                         "reversals": lp_plan.plan.reversal_count,
                     }
                 )
-            guidance = PredictorCorrectorGuidance(primitives, zones, entry[3])
+            guidance = PredictorCorrectorGuidance(primitives, zones, entry[3], bias_correction=False)
             start_time = time.time()
             with count_evaluations() as counter:
                 command = guidance.command(entry[:3] + (primitives.profile.energy[0],), 1, 45.0)
@@ -296,12 +317,19 @@ def main():
     parser.add_argument("--zones", type=int, nargs="+", default=[1, 2, 3, 4, 5], help="Synthetic zone counts m")
     parser.add_argument("--samples", type=int, nargs="+", default=[1500], help="Synthetic energy samples")
     parser.add_argument("--cells", type=int, nargs="+", default=[20, 40, 80], help="LP energy cells K")
+    parser.add_argument(
+        "--prediction-intervals",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4],
+        help="Guidance cycles M between predictor-corrector 3DOF bias predictions",
+    )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     results = {}
     if not args.skip_example:
-        records, primitives_time = benchmark_example(ReentryScenario())
+        records, primitives_time = benchmark_example(ReentryScenario(), args.prediction_intervals)
         results["arc_primitives_time_s"] = primitives_time
         results["example"] = [asdict(record) for record in records]
         for record in records:

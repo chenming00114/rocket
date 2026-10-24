@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from spacegnc.reentry.planner import ArcPrimitives
 from spacegnc.reentry.predictor_corrector import PredictorCorrectorGuidance, remaining_profile
 from spacegnc.reentry.scenario import KeepOutZone, ReentryScenario
 from spacegnc.reentry.simulation import TERMINAL_ENERGY_STATUS, BankReversalSimulator
@@ -77,3 +78,32 @@ def test_segmented_run_matches_a_single_run():
     _, final_states, final_status = simulator.run_segment(states[-1], time[-1], 50.0, [], -1, scenario.terminal_energy)
     assert final_status == TERMINAL_ENERGY_STATUS
     assert np.allclose(final_states[-1, :3], single.position[-1], rtol=0, atol=50.0)
+
+
+def test_3dof_bias_correction_reduces_the_closed_loop_miss():
+    """Test the per cycle 3DOF bias correction brings the closed-loop miss well under the uncorrected one."""
+    scenario = ReentryScenario()
+    frame = scenario.build_frame()
+    simulator = BankReversalSimulator(
+        scenario.build_dynamics(frame),
+        scenario.initial_state(frame),
+        scenario.terminal_energy,
+        scenario.bank_rate_deg,
+        max_step=10.0,
+    )
+    primitives = ArcPrimitives(simulator, np.arange(40.0, 70.1, 10.0))
+    bank_magnitude_deg = primitives.bank_magnitude_for_range(1.03 * abs(scenario.entry_downrange))
+    misses = {}
+    for bias_correction in (False, True):
+        guidance = PredictorCorrectorGuidance(
+            primitives,
+            scenario.keep_out_zones,
+            scenario.clearance_margin,
+            bias_correction=bias_correction,
+        )
+        result = guidance.fly(simulator, bank_magnitude_deg, cycle_energy=2e6)
+        assert result.trajectory.status == TERMINAL_ENERGY_STATUS
+        assert min(passage.clearance for passage in result.passages) >= scenario.clearance_margin
+        assert (result.predictions > 0) == bias_correction
+        misses[bias_correction] = np.linalg.norm(result.miss)
+    assert misses[True] < 0.5 and misses[True] < 0.25 * misses[False]
