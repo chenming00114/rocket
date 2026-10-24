@@ -41,11 +41,13 @@ class EvaluationCounter:
 
 @contextlib.contextmanager
 def count_evaluations(simulator: BankReversalSimulator | None = None):
-    """Count reduced arc chains, relaxed LP paths and 3DOF runs or closed-loop segments made inside the context."""
+    """Count reduced arc chains, relaxed LP paths and 3DOF integrations made inside the context.
+
+    A full run delegates to one segment, so counting segments counts both shooting runs and closed-loop segments.
+    """
     counter = EvaluationCounter()
     arc_chain = reduced_model.reduced_arc_chain
     relaxed_path = LinearProgramReversalPlanner.relaxed_path
-    run = simulator.run if simulator is not None else None
     run_segment = simulator.run_segment if simulator is not None else None
 
     def counted_arc_chain(*args, **kwargs):
@@ -56,10 +58,6 @@ def count_evaluations(simulator: BankReversalSimulator | None = None):
         counter.reduced_paths += 1
         return relaxed_path(self, *args, **kwargs)
 
-    def counted_run(*args, **kwargs):
-        counter.integrations += 1
-        return run(*args, **kwargs)
-
     def counted_run_segment(*args, **kwargs):
         counter.integrations += 1
         return run_segment(*args, **kwargs)
@@ -67,7 +65,6 @@ def count_evaluations(simulator: BankReversalSimulator | None = None):
     reduced_model.reduced_arc_chain = counted_arc_chain
     LinearProgramReversalPlanner.relaxed_path = counted_relaxed_path
     if simulator is not None:
-        simulator.run = counted_run
         simulator.run_segment = counted_run_segment
     try:
         yield counter
@@ -75,7 +72,6 @@ def count_evaluations(simulator: BankReversalSimulator | None = None):
         reduced_model.reduced_arc_chain = arc_chain
         LinearProgramReversalPlanner.relaxed_path = relaxed_path
         if simulator is not None:
-            del simulator.run
             del simulator.run_segment
 
 
