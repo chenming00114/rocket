@@ -171,7 +171,7 @@ class LinearProgramReversalPlanner:
         return np.asarray(rows).reshape(-1, bank_sign.size), np.asarray(biases), np.asarray(zone_of_row, int), sides
 
     def _solve_round(self, profile, cell_of_sample, curvature_columns, bank_sign, trust_radius, bang_bang_weight):
-        """One LP about the current relaxed bank sign."""
+        """One LP about the current relaxed bank sign, None when the interior point Newton system is singular."""
         cell_count = self.cell_count
         downrange, crossrange, heading = self.relaxed_path(profile, cell_of_sample, bank_sign)
         heading_jacobian = curvature_columns
@@ -240,7 +240,11 @@ class LinearProgramReversalPlanner:
             ],
             bounds=Bounds(upper_bound=upper, lower_bound=lower),
         )
-        solution = solve_linear_program_interior_point_method(problem, max_iterations=200, rtol=1e-6)
+        try:
+            solution = solve_linear_program_interior_point_method(problem, max_iterations=200, rtol=1e-6)
+        except np.linalg.LinAlgError:
+            # The dense normal matrix can turn singular near a degenerate vertex, keep the current sign
+            return None
         new_sign = np.clip(solution.original_primal[u_slice], -1, 1)
         _, new_crossrange, new_heading = self.relaxed_path(profile, cell_of_sample, new_sign)
         return ConvexificationRound(
@@ -268,6 +272,23 @@ class LinearProgramReversalPlanner:
             round_result = self._solve_round(
                 profile, cell_of_sample, curvature_columns, bank_sign, trust_radius, bang_bang_weight
             )
+            if round_result is None:
+                LOG.warning(f"LP round {idx}: singular interior point system, stopping at the previous bank sign")
+                if not rounds:
+                    downrange, crossrange, heading = self.relaxed_path(profile, cell_of_sample, bank_sign)
+                    rounds.append(
+                        ConvexificationRound(
+                            bank_sign=bank_sign,
+                            sides=[
+                                passage.side for passage in reduced_model.zone_passages(downrange, crossrange, self.zones)
+                            ],
+                            crossrange_miss_km=crossrange[-1] / KILOMETER,
+                            final_heading_deg=float(np.degrees(heading[-1])),
+                            interior_point_iterations=0,
+                            converged=False,
+                        )
+                    )
+                break
             step = np.max(np.abs(round_result.bank_sign - bank_sign))
             bank_sign = round_result.bank_sign
             rounds.append(round_result)
