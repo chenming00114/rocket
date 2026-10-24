@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Circle
 
+from spacegnc.reentry.lp_planner import LinearProgramPlan
 from spacegnc.reentry.planner import ArcPrimitives, ArcProfile, ReversalPlan
 from spacegnc.reentry.scenario import KeepOutZone
 from spacegnc.reentry.shooting import MEGAJOULE, ShootingResult
@@ -204,4 +205,30 @@ def plot_convergence(path: Path, histories: list[tuple[str, list[float]]]):
     ax.xaxis.get_major_locator().set_params(integer=True)
     ax.grid(alpha=0.3, which="both")
     ax.legend()
+    _save(fig, path)
+
+
+def plot_relaxed_bank_sign(path: Path, lp_plan: LinearProgramPlan):
+    """Relaxed cell bank sign of every LP round with the extracted and polished reversal energies."""
+    fig, ax = plt.subplots(figsize=(12, 4))
+    edges = lp_plan.cell_edges / MEGAJOULE
+    for idx, round_result in enumerate(lp_plan.rounds):
+        last = idx == len(lp_plan.rounds) - 1
+        ax.stairs(
+            round_result.bank_sign,
+            edges,
+            color="tab:blue" if last else "tab:gray",
+            alpha=1.0 if last else 0.4,
+            lw=2 if last else 1,
+            label=f"round {idx} ({round_result.interior_point_iterations} IPM iterations)",
+        )
+    for idx, energy in enumerate(lp_plan.extracted_energies):
+        ax.axvline(energy / MEGAJOULE, color="tab:orange", ls="--", label="sign switch of u" if idx == 0 else None)
+    for idx, energy in enumerate(lp_plan.plan.reversal_energies):
+        ax.axvline(energy / MEGAJOULE, color="tab:purple", label="e_k polished (reduced)" if idx == 0 else None)
+    ax.set_xlabel("Specific energy e [MJ/kg]")
+    ax.set_ylabel("Relaxed bank sign u")
+    ax.set_title(f"Sequential LP bank sign, sides {lp_plan.plan.label}")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="lower right")
     _save(fig, path)

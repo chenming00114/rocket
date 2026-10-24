@@ -1,8 +1,9 @@
 """Run the EXAMPLE reentry bank-reversal planning case end to end.
 
 Arc primitives -> side assignments -> reduced reversal plans -> full 3DOF shooting -> plots and summary.
+The lp planner replaces the side assignment enumeration with sequential LPs on a relaxed bank sign.
 
-    python -m spacegnc.reentry.run_reentry --output-dir reentry_output
+    python -m spacegnc.reentry.run_reentry --output-dir reentry_output [--planner lp]
 """
 
 import argparse
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from spacegnc.logconfig import create_logger
+from spacegnc.reentry.lp_planner import LinearProgramReversalPlanner
 from spacegnc.reentry.planner import ArcPrimitives, BankReversalPlanner
 from spacegnc.reentry.plotting import (
     plot_arc_primitives,
@@ -20,6 +22,7 @@ from spacegnc.reentry.plotting import (
     plot_energy_windows,
     plot_ground_track,
     plot_profiles,
+    plot_relaxed_bank_sign,
 )
 from spacegnc.reentry.scenario import ReentryScenario
 from spacegnc.reentry.shooting import MEGAJOULE, shoot
@@ -29,10 +32,13 @@ LOG = create_logger(__name__)
 
 # Margin of required arc length over the straight downrange to pay for weaving
 RANGE_MARGIN = 1.03
+# Planner choices, enumeration of side assignments is the default
+ENUMERATION_PLANNER = "enumeration"
+LINEAR_PROGRAM_PLANNER = "lp"
 
 
-def run_case(scenario: ReentryScenario, output_dir: Path) -> dict:
-    """Plan, shoot and plot the scenario, returning the run summary."""
+def run_case(scenario: ReentryScenario, output_dir: Path, planner_kind: str = ENUMERATION_PLANNER) -> dict:
+    """Plan, shoot and plot the scenario with the chosen planner, returning the run summary."""
     start_time = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,13 +67,32 @@ def run_case(scenario: ReentryScenario, output_dir: Path) -> dict:
     initial_bank_deg = primitives.bank_magnitude_for_range(RANGE_MARGIN * abs(scenario.entry_downrange))
     LOG.info(f"|sigma| from S(e_f) = {RANGE_MARGIN}|X0|: {initial_bank_deg:.2f} deg")
 
-    plans = planner.plan_all_assignments(initial_bank_deg)
-    if not plans:
-        raise RuntimeError("No side assignment is feasible in the reduced model.")
-    # Shoot the best plan and the runner up for comparison
+    planning_start_time = time.time()
+    if planner_kind == LINEAR_PROGRAM_PLANNER:
+        lp_planner = LinearProgramReversalPlanner(
+            primitives,
+            scenario.keep_out_zones,
+            scenario.entry_downrange,
+            scenario.entry_crossrange,
+            heading0,
+            scenario.clearance_margin,
+        )
+        lp_plan = lp_planner.plan(initial_bank_deg)
+        if not lp_plan.plan.feasible:
+            LOG.warning("LP reversal plan misses the reduced tolerances, shooting it anyway")
+        plans, refined_plans = [lp_plan.plan], [lp_plan.plan]
+        plot_relaxed_bank_sign(output_dir / "relaxed_bank_sign.png", lp_plan)
+    else:
+        plans = planner.plan_all_assignments(initial_bank_deg)
+        if not plans:
+            raise RuntimeError("No side assignment is feasible in the reduced model.")
+        # Shoot the best plan and the runner up for comparison
+        refined_plans = [planner.refine_bank_magnitude(plan) for plan in plans[:2]]
+    planning_time = time.time() - planning_start_time
+    LOG.info(f"Reduced planning with the {planner_kind} planner took {planning_time:.1f} s")
+
     shots = []
-    for name, color, plan in zip(("chosen", "alternate"), ("tab:blue", "tab:gray"), plans[:2]):
-        refined = planner.refine_bank_magnitude(plan)
+    for name, color, refined in zip(("chosen", "alternate"), ("tab:blue", "tab:gray"), refined_plans):
         shot = shoot(simulator, refined, scenario.keep_out_zones)
         LOG.info(
             f"Shooting {name} {refined.label}: miss history {np.round(shot.miss_history, 3)} km, "
@@ -107,6 +132,8 @@ def run_case(scenario: ReentryScenario, output_dir: Path) -> dict:
             }
             for plan in plans
         ],
+        "planner": planner_kind,
+        "planning_time_s": planning_time,
         "initial_bank_deg": initial_bank_deg,
         "chosen": {
             "sides": chosen_plan.label,
@@ -126,9 +153,10 @@ def run_case(scenario: ReentryScenario, output_dir: Path) -> dict:
             "status": trajectory.status,
         },
     }
+    summary["total_time_s"] = time.time() - start_time
     with open(output_dir / "summary.json", "w") as file:
         json.dump(summary, file, indent=1, default=float)
-    LOG.info(f"Case finished in {time.time() - start_time:.0f} s, outputs in {output_dir}")
+    LOG.info(f"Case finished in {summary['total_time_s']:.0f} s, outputs in {output_dir}")
     return summary
 
 
@@ -136,8 +164,14 @@ def main():
     """Parse command line arguments and run the example case."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output-dir", type=Path, default=Path("reentry_output"), help="Directory for plots and summary")
+    parser.add_argument(
+        "--planner",
+        choices=(ENUMERATION_PLANNER, LINEAR_PROGRAM_PLANNER),
+        default=ENUMERATION_PLANNER,
+        help="Reversal planner, side assignment enumeration or sequential LP on a relaxed bank sign",
+    )
     args = parser.parse_args()
-    run_case(ReentryScenario(), args.output_dir)
+    run_case(ReentryScenario(), args.output_dir, args.planner)
 
 
 if __name__ == "__main__":
