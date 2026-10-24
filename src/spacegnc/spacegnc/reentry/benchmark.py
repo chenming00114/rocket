@@ -2,6 +2,7 @@
 
 Every planner shares the arc primitives and the 3DOF shooting, so the comparison counts what differs:
 reduced model path evaluations, LP interior point iterations, full 3DOF integrations and wall time.
+The predictor-corrector guidance needs no shooting, its 3DOF closed-loop flight is counted in segments.
 
     python -m spacegnc.reentry.benchmark --output-dir reentry_benchmark
 """
@@ -18,7 +19,8 @@ import numpy as np
 from spacegnc.logconfig import create_logger
 from spacegnc.reentry import planner as reduced_model
 from spacegnc.reentry.lp_planner import LinearProgramReversalPlanner
-from spacegnc.reentry.planner import ArcPrimitives, ArcProfile, BankReversalPlanner
+from spacegnc.reentry.planner import ArcPrimitives, ArcProfile, BankReversalPlanner, side_label
+from spacegnc.reentry.predictor_corrector import PredictorCorrectorGuidance
 from spacegnc.reentry.run_reentry import RANGE_MARGIN
 from spacegnc.reentry.scenario import KeepOutZone, ReentryScenario
 from spacegnc.reentry.shooting import MEGAJOULE, shoot
@@ -39,11 +41,12 @@ class EvaluationCounter:
 
 @contextlib.contextmanager
 def count_evaluations(simulator: BankReversalSimulator | None = None):
-    """Count reduced arc chains, relaxed LP paths and 3DOF runs made inside the context."""
+    """Count reduced arc chains, relaxed LP paths and 3DOF runs or closed-loop segments made inside the context."""
     counter = EvaluationCounter()
     arc_chain = reduced_model.reduced_arc_chain
     relaxed_path = LinearProgramReversalPlanner.relaxed_path
     run = simulator.run if simulator is not None else None
+    run_segment = simulator.run_segment if simulator is not None else None
 
     def counted_arc_chain(*args, **kwargs):
         counter.reduced_paths += 1
@@ -57,10 +60,15 @@ def count_evaluations(simulator: BankReversalSimulator | None = None):
         counter.integrations += 1
         return run(*args, **kwargs)
 
+    def counted_run_segment(*args, **kwargs):
+        counter.integrations += 1
+        return run_segment(*args, **kwargs)
+
     reduced_model.reduced_arc_chain = counted_arc_chain
     LinearProgramReversalPlanner.relaxed_path = counted_relaxed_path
     if simulator is not None:
         simulator.run = counted_run
+        simulator.run_segment = counted_run_segment
     try:
         yield counter
     finally:
@@ -68,6 +76,7 @@ def count_evaluations(simulator: BankReversalSimulator | None = None):
         LinearProgramReversalPlanner.relaxed_path = relaxed_path
         if simulator is not None:
             del simulator.run
+            del simulator.run_segment
 
 
 @dataclass
@@ -156,6 +165,32 @@ def benchmark_example(scenario: ReentryScenario) -> tuple[list[PlannerRecord], f
         "bang_bang_fraction": lp_plan.bang_bang_fraction,
     }
     records.append(shoot_and_record("lp", simulator, scenario, lp_plan.plan, time.time() - start_time, counter, extra))
+
+    start_time = time.time()
+    with count_evaluations(simulator) as counter:
+        guidance = PredictorCorrectorGuidance(primitives, scenario.keep_out_zones, scenario.clearance_margin)
+        result = guidance.fly(simulator, initial_bank_deg)
+    guidance_time = time.time() - start_time
+    # Guidance and 3DOF flight are interleaved, so the closed-loop time is booked as planning
+    min_clearance = min(passage.clearance for passage in result.passages)
+    records.append(
+        PlannerRecord(
+            planner="predictor-corrector",
+            sides=side_label([passage.side for passage in result.passages]),
+            reversal_count=int(result.reversal_energies.size),
+            bank_magnitude_deg=result.commands[-1].bank_magnitude_deg,
+            reversal_energies_mj_per_kg=list(result.reversal_energies / MEGAJOULE),
+            miss_km=float(np.linalg.norm(result.miss)),
+            min_clearance_km=min_clearance / KILOMETER,
+            works=bool(np.linalg.norm(result.miss) < 0.2 and min_clearance >= 0.0),
+            planning_time_s=guidance_time,
+            shooting_time_s=0.0,
+            planning_reduced_paths=counter.reduced_paths,
+            planning_integrations=counter.integrations,
+            shooting_integrations=0,
+            extra={"guidance_cycles": len(result.commands), "status": result.trajectory.status},
+        )
+    )
     return records, primitives_time
 
 
@@ -195,7 +230,11 @@ def synthetic_zones(zone_count: int, total_range: float = 2.0e6) -> list[KeepOut
 
 
 def planner_scaling(zone_counts, energy_samples, cell_counts) -> list[dict]:
-    """Planning wall time and reduced path count of both planners against m zones, samples and K cells."""
+    """Planning wall time and reduced path count against m zones, samples and K cells.
+
+    The predictor-corrector row is the cost of one guidance cycle at entry, a closed-loop flight repeats it
+    once per cycle.
+    """
     rows = []
     for zone_count in zone_counts:
         for samples in energy_samples:
@@ -233,7 +272,23 @@ def planner_scaling(zone_counts, energy_samples, cell_counts) -> list[dict]:
                         "reversals": lp_plan.plan.reversal_count,
                     }
                 )
-            LOG.info(f"Scaling m={zone_count} samples={samples}: {rows[-len(cell_counts) - 1 :]}")
+            guidance = PredictorCorrectorGuidance(primitives, zones, entry[3])
+            start_time = time.time()
+            with count_evaluations() as counter:
+                command = guidance.command(entry[:3] + (primitives.profile.energy[0],), 1, 45.0)
+            rows.append(
+                {
+                    "planner": "predictor-corrector cycle",
+                    "zones": zone_count,
+                    "samples": samples,
+                    "cells": None,
+                    "time_s": time.time() - start_time,
+                    "reduced_paths": counter.reduced_paths,
+                    "feasible": command.predicted_clearance_km * KILOMETER >= entry[3],
+                    "reversals": None if command.next_reversal is None else 1,
+                }
+            )
+            LOG.info(f"Scaling m={zone_count} samples={samples}: {rows[-len(cell_counts) - 2 :]}")
     return rows
 
 

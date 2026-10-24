@@ -89,15 +89,37 @@ class BankReversalSimulator:
 
     def run(self, bank_magnitude_deg: float, reversal_energies=(), initial_sign: int = 1) -> EntryTrajectory:
         """Simulate to the terminal energy with reversals at the given energies (J/kg)."""
+        augmented_state0 = np.append(self.initial_state, initial_sign * np.radians(bank_magnitude_deg))
+        time, augmented_states, status = self.run_segment(
+            augmented_state0, 0.0, bank_magnitude_deg, reversal_energies, initial_sign, self.terminal_energy
+        )
+        return self.post_process(time, augmented_states, status)
+
+    def run_segment(
+        self,
+        augmented_state0: np.ndarray,
+        time0: float,
+        bank_magnitude_deg: float,
+        reversal_energies,
+        initial_sign: int,
+        stop_energy: float,
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """Integrate [state, bank] from time0 until the stop energy, the terminal energy or a limit event.
+
+        The bank command starts at initial_sign |sigma| and flips at every reversal energy passed.
+        Returns the time, augmented state history and the status, which is None when only the stop
+        energy short of the terminal energy was reached.
+        """
         bank_magnitude = np.radians(bank_magnitude_deg)
         reversal_energies = np.sort(np.asarray(reversal_energies, dtype=float))
+        stop_energy = min(stop_energy, self.terminal_energy)
         frame = self.dynamics.frame
 
         def altitude_of(augmented_state):
             return np.linalg.norm(frame.geocentric_position(augmented_state[:3])) - frame.target_radius
 
-        def terminal_energy_event(time, augmented_state, *args):
-            return self.dynamics.specific_energy(augmented_state[:6]) - self.terminal_energy
+        def stop_energy_event(time, augmented_state, *args):
+            return self.dynamics.specific_energy(augmented_state[:6]) - stop_energy
 
         def altitude_floor_event(time, augmented_state, *args):
             return altitude_of(augmented_state) - self.ALTITUDE_FLOOR
@@ -105,26 +127,27 @@ class BankReversalSimulator:
         def skip_out_event(time, augmented_state, *args):
             return altitude_of(augmented_state) - self.SKIP_OUT_ALTITUDE
 
-        terminal_energy_event.terminal, terminal_energy_event.direction = True, 1
+        stop_energy_event.terminal, stop_energy_event.direction = True, 1
         altitude_floor_event.terminal, altitude_floor_event.direction = True, -1
         skip_out_event.terminal = True
 
         solution = solve_ivp(
             self._state_equation,
-            (0.0, self.MAX_DURATION),
-            np.append(self.initial_state, initial_sign * bank_magnitude),
+            (time0, self.MAX_DURATION),
+            np.asarray(augmented_state0, dtype=float),
             args=(bank_magnitude, reversal_energies, initial_sign),
             method="RK45",
             rtol=1e-8,
             atol=1e-6,
             max_step=self.max_step,
-            events=[terminal_energy_event, altitude_floor_event, skip_out_event],
+            events=[stop_energy_event, altitude_floor_event, skip_out_event],
         )
-        event_status = (TERMINAL_ENERGY_STATUS, ALTITUDE_FLOOR_STATUS, SKIP_OUT_STATUS)
+        stop_status = TERMINAL_ENERGY_STATUS if stop_energy >= self.terminal_energy else None
+        event_status = (stop_status, ALTITUDE_FLOOR_STATUS, SKIP_OUT_STATUS)
         status = next((label for label, events in zip(event_status, solution.t_events) if len(events)), TIMEOUT_STATUS)
-        return self._post_process(solution.t, solution.y.T, status)
+        return solution.t, solution.y.T, status
 
-    def _post_process(self, time: np.ndarray, augmented_states: np.ndarray, status: str) -> EntryTrajectory:
+    def post_process(self, time: np.ndarray, augmented_states: np.ndarray, status: str) -> EntryTrajectory:
         """Derive navigation, aero and ground track quantities along the trajectory."""
         frame = self.dynamics.frame
         position, velocity = augmented_states[:, :3], augmented_states[:, 3:6]

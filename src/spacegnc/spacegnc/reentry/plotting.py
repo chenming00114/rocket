@@ -8,6 +8,7 @@ from matplotlib.patches import Circle
 
 from spacegnc.reentry.lp_planner import LinearProgramPlan
 from spacegnc.reentry.planner import ArcPrimitives, ArcProfile, ReversalPlan
+from spacegnc.reentry.predictor_corrector import ClosedLoopResult
 from spacegnc.reentry.scenario import KeepOutZone
 from spacegnc.reentry.shooting import MEGAJOULE, ShootingResult
 
@@ -21,15 +22,8 @@ def _save(fig, path: Path):
     plt.close(fig)
 
 
-def plot_ground_track(
-    path: Path,
-    zones: list[KeepOutZone],
-    margin: float,
-    entry_point: tuple[float, float],
-    shots: list[tuple[str, str, ReversalPlan, ShootingResult]],
-):
-    """Ground track of reduced arc chains and shot 3DOF trajectories with keep-out zones."""
-    fig, ax = plt.subplots(figsize=(13, 6))
+def _draw_zones(ax, zones: list[KeepOutZone], margin: float):
+    """Keep-out zones with their clearance margin circles in km."""
     for idx, zone in enumerate(zones):
         center = (zone.downrange / KILOMETER, zone.crossrange / KILOMETER)
         ax.add_patch(
@@ -46,6 +40,18 @@ def plot_ground_track(
             )
         )
         ax.text(*center, f"Z{idx + 1}", ha="center", va="center", fontsize=11, weight="bold")
+
+
+def plot_ground_track(
+    path: Path,
+    zones: list[KeepOutZone],
+    margin: float,
+    entry_point: tuple[float, float],
+    shots: list[tuple[str, str, ReversalPlan, ShootingResult]],
+):
+    """Ground track of reduced arc chains and shot 3DOF trajectories with keep-out zones."""
+    fig, ax = plt.subplots(figsize=(13, 6))
+    _draw_zones(ax, zones, margin)
     ax.axhline(0, color="k", lw=0.8, ls="-.", label="reference line Y=0")
 
     for name, color, plan, shot in shots:
@@ -144,7 +150,7 @@ def plot_energy_windows(
     _save(fig, path)
 
 
-def plot_profiles(path: Path, shot: ShootingResult, bank_rate_deg: float):
+def plot_profiles(path: Path, shot: ShootingResult | ClosedLoopResult, bank_rate_deg: float):
     """Altitude, speed and Mach, bank and heading histories of the shot trajectory."""
     trajectory = shot.trajectory
     fig, axs = plt.subplots(2, 2, figsize=(13, 8))
@@ -231,4 +237,56 @@ def plot_relaxed_bank_sign(path: Path, lp_plan: LinearProgramPlan):
     ax.set_title(f"Sequential LP bank sign, sides {lp_plan.plan.label}")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc="lower right")
+    _save(fig, path)
+
+
+def plot_closed_loop(
+    path: Path, zones: list[KeepOutZone], margin: float, entry_point: tuple[float, float], result: ClosedLoopResult
+):
+    """Closed-loop ground track and the per cycle |sigma| and next reversal commands."""
+    fig, (track_ax, command_ax) = plt.subplots(2, 1, figsize=(13, 9), height_ratios=[3, 2])
+    _draw_zones(track_ax, zones, margin)
+    track_ax.axhline(0, color="k", lw=0.8, ls="-.", label="reference line Y=0")
+    trajectory = result.trajectory
+    track_ax.plot(
+        trajectory.downrange / KILOMETER,
+        trajectory.crossrange / KILOMETER,
+        color="tab:blue",
+        lw=2.2,
+        label=f"closed-loop full 3DOF (N={result.reversal_energies.size})",
+    )
+    track_ax.plot(
+        trajectory.value_at_energy(result.reversal_energies, trajectory.downrange) / KILOMETER,
+        trajectory.value_at_energy(result.reversal_energies, trajectory.crossrange) / KILOMETER,
+        "o",
+        ms=8,
+        mfc="w",
+        mec="tab:blue",
+        mew=2,
+        label="reversal (3DOF)",
+    )
+    track_ax.plot([entry_point[0] / KILOMETER], [entry_point[1] / KILOMETER], "s", color="g", ms=9, label="entry")
+    track_ax.plot([0], [0], "*", color="gold", mec="k", ms=18, label="target (origin)")
+    track_ax.set(
+        xlabel="Downrange X [km] (target at 0)", ylabel="Crossrange Y [km]", title="Predictor-corrector ground track"
+    )
+    track_ax.set_xlim(entry_point[0] / KILOMETER - 150, 150)
+    track_ax.legend(fontsize=8, loc="lower left", ncol=2)
+
+    energy = np.array([command.energy for command in result.commands]) / MEGAJOULE
+    command_ax.step(energy, [command.bank_magnitude_deg for command in result.commands], where="post", label="|σ| command")
+    command_ax.set(xlabel="Specific energy at the guidance cycle [MJ/kg]", ylabel="|σ| [deg]")
+    reversal_ax = command_ax.twinx()
+    reversal_ax.plot(
+        energy,
+        [np.nan if command.next_reversal is None else command.next_reversal / MEGAJOULE for command in result.commands],
+        "o",
+        color="tab:purple",
+        ms=4,
+        label="next reversal e_1",
+    )
+    reversal_ax.set_ylabel("Next reversal e_1 [MJ/kg]", color="tab:purple")
+    command_ax.legend(loc="upper left")
+    for ax in (track_ax, command_ax):
+        ax.grid(alpha=0.3)
     _save(fig, path)
