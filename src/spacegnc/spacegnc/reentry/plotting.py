@@ -22,7 +22,7 @@ def _save(fig, path: Path):
     plt.close(fig)
 
 
-def _draw_zones(ax, zones: list[KeepOutZone], margin: float):
+def draw_zones(ax, zones: list[KeepOutZone], margin: float):
     """Keep-out zones with their clearance margin circles in km."""
     for idx, zone in enumerate(zones):
         center = (zone.downrange / KILOMETER, zone.crossrange / KILOMETER)
@@ -51,7 +51,7 @@ def plot_ground_track(
 ):
     """Ground track of reduced arc chains and shot 3DOF trajectories with keep-out zones."""
     fig, ax = plt.subplots(figsize=(13, 6))
-    _draw_zones(ax, zones, margin)
+    draw_zones(ax, zones, margin)
     ax.axhline(0, color="k", lw=0.8, ls="-.", label="reference line Y=0")
 
     for name, color, plan, shot in shots:
@@ -245,7 +245,7 @@ def plot_closed_loop(
 ):
     """Closed-loop ground track and the per cycle |sigma| and next reversal commands."""
     fig, (track_ax, command_ax) = plt.subplots(2, 1, figsize=(13, 9), height_ratios=[3, 2])
-    _draw_zones(track_ax, zones, margin)
+    draw_zones(track_ax, zones, margin)
     track_ax.axhline(0, color="k", lw=0.8, ls="-.", label="reference line Y=0")
     trajectory = result.trajectory
     track_ax.plot(
