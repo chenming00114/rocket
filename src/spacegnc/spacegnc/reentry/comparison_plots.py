@@ -118,6 +118,21 @@ def plot_bank_vs_energy(runs: list[GuidanceRun], path: Path | None = None):
     return _finish(fig, path)
 
 
+def plot_bank_vs_time(runs: list[GuidanceRun], path: Path | None = None):
+    """Flown bank angle and, for closed-loop runs, the commanded |σ| per guidance update against time."""
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    for idx, run in enumerate(runs):
+        trajectory = run.trajectory
+        ax.plot(trajectory.time, np.degrees(trajectory.bank), lw=1.4, label=run.name, **style(idx))
+        if "time" in run.cycle_diagnostics:
+            diagnostics = run.cycle_diagnostics
+            ax.plot(diagnostics["time"], diagnostics["bank_magnitude_deg"], ".", ms=3, color=style(idx)["color"])
+    ax.set(xlabel="Time t [s] (dots = commanded |σ| per guidance update)", ylabel="σ [deg]")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+    return _finish(fig, path)
+
+
 def plot_state_vs_energy(runs: list[GuidanceRun], path: Path | None = None):
     """Altitude, speed, heading and crossrange of the flown trajectories against specific energy."""
     fig, axs = plt.subplots(2, 2, figsize=(13, 8), sharex=True)

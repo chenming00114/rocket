@@ -400,10 +400,14 @@ class LinearProgramReversalPlanner:
             ),
         )
 
-    def plan_from_start(self, bank_magnitude_deg: float, start_sign: float) -> LinearProgramPlan:
-        """Relaxed LP rounds from a constant bank sign, reversal extraction and polishing into a reduced plan."""
+    def plan_from_start(
+        self, bank_magnitude_deg: float, start_sign: float, initial_bank_sign: np.ndarray | None = None
+    ) -> LinearProgramPlan:
+        """Relaxed LP rounds from a constant (or the given) bank sign, reversal extraction and polishing into a plan."""
         profile = self.primitives.at(bank_magnitude_deg)
-        cell_edges, rounds = self.solve_relaxed(profile, np.full(self.cell_count, start_sign))
+        if initial_bank_sign is None:
+            initial_bank_sign = np.full(self.cell_count, start_sign)
+        cell_edges, rounds = self.solve_relaxed(profile, initial_bank_sign)
         extracted_energies, initial_sign = switch_energies(rounds[-1].bank_sign, cell_edges)
         LOG.info(
             f"LP sign switches: N={extracted_energies.size} d0={initial_sign:+d} "
