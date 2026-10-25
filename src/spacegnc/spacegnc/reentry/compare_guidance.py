@@ -3,7 +3,7 @@
 All strategies share one set of arc primitives. Each strategy is a function returning a GuidanceRun,
 registered in STRATEGIES, so a new one needs a runner here and an adapter in evaluation.
 
-    python -m spacegnc.reentry.compare_guidance --strategies enumeration lp pc pc-bias --output-dir compare
+    python -m spacegnc.reentry.compare_guidance --strategies enumeration lp lp-3dof pc pc-bias --output-dir compare
 """
 
 import argparse
@@ -18,6 +18,7 @@ from spacegnc.logconfig import create_logger
 from spacegnc.reentry import comparison_plots
 from spacegnc.reentry.benchmark import count_evaluations
 from spacegnc.reentry.evaluation import GuidanceRun, from_closed_loop, from_shooting, summary_rows, write_summary
+from spacegnc.reentry.full_dynamics_lp import FullDynamicsLinearProgramReversalPlanner
 from spacegnc.reentry.lp_planner import LinearProgramReversalPlanner
 from spacegnc.reentry.planner import ArcPrimitives, BankReversalPlanner
 from spacegnc.reentry.predictor_corrector import PredictorCorrectorGuidance
@@ -72,6 +73,10 @@ def shoot_plan(name: str, case: ComparisonCase, make_plan) -> GuidanceRun:
         shot = shoot(case.simulator, plan, case.scenario.keep_out_zones)
     timing = {"primitives": case.primitives_time_s, "planning": planning_time, "shooting": time.time() - start_time}
     integrations = planning_counter.integrations + shooting_counter.integrations
+    LOG.info(
+        f"{name}: planning {planning_counter.integrations} 3DOF integrations ({planning_counter.relaxed_integrations} "
+        f"relaxed bank sign runs), shooting {shooting_counter.integrations}"
+    )
     return from_shooting(name, shot, timing, planning_counter.reduced_paths, integrations)
 
 
@@ -89,6 +94,14 @@ def run_linear_program(case: ComparisonCase, options) -> GuidanceRun:
     """Sequential LP on the relaxed bank sign with its polished plan shot in 3DOF."""
     planner = LinearProgramReversalPlanner(case.primitives, case.scenario.keep_out_zones, *case.entry)
     return shoot_plan("lp", case, lambda: planner.plan(case.initial_bank_deg).plan)
+
+
+def run_full_dynamics_linear_program(case: ComparisonCase, options) -> GuidanceRun:
+    """Sequential LP linearized on relaxed bank sign 3DOF runs with its 3DOF polished plan shot in 3DOF."""
+    planner = FullDynamicsLinearProgramReversalPlanner(
+        case.simulator, case.primitives, case.scenario.keep_out_zones, *case.entry
+    )
+    return shoot_plan("lp-3dof", case, lambda: planner.plan(case.initial_bank_deg).plan)
 
 
 def fly_predictor_corrector(name: str, case: ComparisonCase, bias_correction: bool, prediction_interval: int):
@@ -123,6 +136,7 @@ def run_bias_corrected(case: ComparisonCase, options) -> GuidanceRun:
 STRATEGIES = {
     "enumeration": run_enumeration,
     "lp": run_linear_program,
+    "lp-3dof": run_full_dynamics_linear_program,
     "pc": run_predictor_corrector,
     "pc-bias": run_bias_corrected,
 }

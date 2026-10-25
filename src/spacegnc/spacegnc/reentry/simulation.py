@@ -112,6 +112,12 @@ class BankReversalSimulator:
         """
         bank_magnitude = np.radians(bank_magnitude_deg)
         reversal_energies = np.sort(np.asarray(reversal_energies, dtype=float))
+        return self._integrate(
+            self._state_equation, augmented_state0, time0, (bank_magnitude, reversal_energies, initial_sign), stop_energy
+        )
+
+    def _integrate(self, state_equation, state0: np.ndarray, time0: float, args: tuple, stop_energy: float):
+        """Integrate a state starting with [r, v] from time0 until the stop energy, the terminal energy or a limit event."""
         stop_energy = min(stop_energy, self.terminal_energy)
         frame = self.dynamics.frame
 
@@ -132,10 +138,10 @@ class BankReversalSimulator:
         skip_out_event.terminal = True
 
         solution = solve_ivp(
-            self._state_equation,
+            state_equation,
             (time0, self.MAX_DURATION),
-            np.asarray(augmented_state0, dtype=float),
-            args=(bank_magnitude, reversal_energies, initial_sign),
+            np.asarray(state0, dtype=float),
+            args=args,
             method="RK45",
             rtol=1e-8,
             atol=1e-6,
@@ -146,6 +152,45 @@ class BankReversalSimulator:
         event_status = (stop_status, ALTITUDE_FLOOR_STATUS, SKIP_OUT_STATUS)
         status = next((label for label, events in zip(event_status, solution.t_events) if len(events)), TIMEOUT_STATUS)
         return solution.t, solution.y.T, status
+
+    def _relaxed_state_equation(self, time, state, bank, lift_fraction):
+        """Entry dynamics with the averaged lift of a relaxed bank sign over one energy cell."""
+        return self.dynamics.continuous_time_state_equation(time, state, np.array([bank, lift_fraction]))
+
+    def run_relaxed(
+        self, bank_magnitude_deg: float, cell_edges: np.ndarray, bank_sign: np.ndarray, start_cell: int = 0, start=None
+    ) -> tuple[EntryTrajectory, list[tuple[float, np.ndarray]]]:
+        """Simulate a relaxed bank sign u_k in [-1, 1] held over energy cells, without reversal slews.
+
+        Switching fast between +|sigma| and -|sigma| with a (1 + u) / 2 share at +|sigma| averages the lift to
+            L (cos|sigma| l0_hat + u sin|sigma| (v_hat x l0_hat)),
+        so the vertical lift is kept and u scales the lateral lift fraction as in the reduced model. That is a
+        bank of atan2(u sin|sigma|, cos|sigma|) with the lift scaled by |cos|sigma| + i u sin|sigma||.
+        Each cell is one integration ending on its edge, so a run from start_cell with the (time, state)
+        an earlier run stored at that edge continues it exactly. Returns the trajectory and the (time, state)
+        at the start of every cell from start_cell on, ending with the final state.
+        """
+        bank_magnitude = np.radians(bank_magnitude_deg)
+        time0, state0 = start if start is not None else (0.0, self.initial_state)
+        edge_states, times, states, status = [(time0, np.asarray(state0, dtype=float))], [], [], None
+        for cell in range(start_cell, len(bank_sign)):
+            lateral, vertical = bank_sign[cell] * np.sin(bank_magnitude), np.cos(bank_magnitude)
+            bank, lift_fraction = np.arctan2(lateral, vertical), np.hypot(lateral, vertical)
+            time, cell_states, status = self._integrate(
+                self._relaxed_state_equation,
+                edge_states[-1][1],
+                edge_states[-1][0],
+                (bank, lift_fraction),
+                cell_edges[cell + 1],
+            )
+            # Every following cell starts on the last sample of the previous one
+            first = 1 if times else 0
+            times.append(time[first:])
+            states.append(np.column_stack([cell_states[first:], np.full(time.size - first, bank)]))
+            edge_states.append((time[-1], cell_states[-1]))
+            if status is not None:
+                break
+        return self.post_process(np.concatenate(times), np.vstack(states), status or TIMEOUT_STATUS), edge_states
 
     def post_process(self, time: np.ndarray, augmented_states: np.ndarray, status: str) -> EntryTrajectory:
         """Derive navigation, aero and ground track quantities along the trajectory."""
