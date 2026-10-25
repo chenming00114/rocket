@@ -20,6 +20,13 @@ SKIP_OUT_STATUS = "skip"
 TIMEOUT_STATUS = "timeout"
 
 
+STANDARD_GRAVITY = 9.80665
+# Sutton-Graves stagnation heating constant for air (kg^0.5 / m), q_dot = k sqrt(rho / R_n) V^3 in W/m^2
+SUTTON_GRAVES_CONSTANT = 1.7415e-4
+# PLACEHOLDER nose radius of the EXAMPLE vehicle (m)
+NOSE_RADIUS = 1.0
+
+
 @dataclass
 class EntryTrajectory:
     """Time history of a simulated entry with derived guidance quantities."""
@@ -41,6 +48,19 @@ class EntryTrajectory:
     # Ground arc length flown S (m)
     arc_length: np.ndarray
     status: str
+    # Dynamic pressure (Pa) and Sutton-Graves stagnation heat rate (W/m^2) of the flown atmosphere
+    dynamic_pressure: np.ndarray | None = None
+    heat_rate: np.ndarray | None = None
+
+    @property
+    def load_factor(self) -> np.ndarray:
+        """Aerodynamic load |L + D| / g0 (-)."""
+        return np.hypot(self.lift, self.drag) / STANDARD_GRAVITY
+
+    @property
+    def heat_load(self) -> float:
+        """Integrated stagnation heat load (J/m^2)."""
+        return float(np.trapezoid(self.heat_rate, self.time)) if self.heat_rate is not None else np.nan
 
     @property
     def monotone_energy(self) -> np.ndarray:
@@ -77,6 +97,10 @@ class BankReversalSimulator:
         self.bank_rate = np.radians(bank_rate_deg)
         self.max_step = max_step
 
+    def initial_augmented_state(self, bank: float) -> np.ndarray:
+        """Entry [r, v, sigma] state at a bank angle (rad)."""
+        return np.append(self.initial_state, bank)
+
     def _state_equation(self, time, augmented_state, bank_magnitude, reversal_energies, initial_sign):
         """Entry dynamics augmented with the rate limited bank angle."""
         state, bank = augmented_state[:6], augmented_state[6]
@@ -89,7 +113,7 @@ class BankReversalSimulator:
 
     def run(self, bank_magnitude_deg: float, reversal_energies=(), initial_sign: int = 1) -> EntryTrajectory:
         """Simulate to the terminal energy with reversals at the given energies (J/kg)."""
-        augmented_state0 = np.append(self.initial_state, initial_sign * np.radians(bank_magnitude_deg))
+        augmented_state0 = self.initial_augmented_state(initial_sign * np.radians(bank_magnitude_deg))
         time, augmented_states, status = self.run_segment(
             augmented_state0, 0.0, bank_magnitude_deg, reversal_energies, initial_sign, self.terminal_energy
         )
@@ -209,12 +233,21 @@ class BankReversalSimulator:
         speed = np.linalg.norm(velocity, axis=1)
         mach = speed / self.dynamics.atmosphere.speed_of_sound(altitude)
         lift, drag = self.dynamics.aero_accelerations(altitude, mach, speed)
+        density = self.dynamics.atmosphere.density(altitude)
+        return self._trajectory(time, augmented_states, status, altitude, speed, mach, lift, drag, density)
+
+    def _trajectory(self, time, augmented_states, status, altitude, speed, mach, lift, drag, density) -> EntryTrajectory:
+        """Trajectory record from the states and the flown altitude, (air) speed, Mach, aero and density."""
+        frame = self.dynamics.frame
+        position, velocity = augmented_states[:, :3], augmented_states[:, 3:6]
+        radius = np.linalg.norm(frame.geocentric_position(position), axis=1)
+        relative_speed = np.linalg.norm(velocity, axis=1)
         downrange, crossrange = frame.surface_range(position)
         flight_path_angle, heading = np.array(
             [frame.flight_path_angle_and_heading(pos, vel) for pos, vel in zip(position, velocity)]
         ).T
         # Ground speed projected to the target radius integrates into ground arc length
-        ground_speed = speed * np.cos(flight_path_angle) * frame.target_radius / radius
+        ground_speed = relative_speed * np.cos(flight_path_angle) * frame.target_radius / radius
         arc_length = np.concatenate([[0.0], np.cumsum(0.5 * (ground_speed[1:] + ground_speed[:-1]) * np.diff(time))])
         return EntryTrajectory(
             time=time,
@@ -222,7 +255,7 @@ class BankReversalSimulator:
             velocity=velocity,
             bank=augmented_states[:, 6],
             altitude=altitude,
-            speed=speed,
+            speed=relative_speed,
             mach=mach,
             energy=self.dynamics.specific_energy(augmented_states[:, :6]),
             downrange=downrange,
@@ -233,4 +266,6 @@ class BankReversalSimulator:
             drag=drag,
             arc_length=arc_length,
             status=status,
+            dynamic_pressure=0.5 * density * speed**2,
+            heat_rate=SUTTON_GRAVES_CONSTANT * np.sqrt(density / NOSE_RADIUS) * speed**3,
         )
