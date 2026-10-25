@@ -154,5 +154,5 @@ def test_scaling_plot_marks_infeasible_points(tmp_path):
 
 
 def test_every_strategy_is_registered():
-    """Test the runner registry covers the four compared strategies."""
-    assert set(STRATEGIES) == {"enumeration", "lp", "pc", "pc-bias"}
+    """Test the runner registry covers the five compared strategies."""
+    assert set(STRATEGIES) == {"enumeration", "lp", "lp-3dof", "pc", "pc-bias"}

@@ -26,6 +26,7 @@ SUMMARY_COLUMNS = (
     ("N", lambda run: run.reversal_energies.size),
     ("e_k [MJ/kg]", lambda run: " / ".join(f"{energy / MEGAJOULE:.3f}" for energy in run.reversal_energies)),
     ("sigma [deg]", lambda run: f"{run.bank_magnitude_deg:.2f}"),
+    ("plan miss [km]", lambda run: f"{run.plan_miss_km:.3f}"),
     ("miss [km]", lambda run: f"{run.miss_norm_km:.3f}"),
     ("min clearance [km]", lambda run: f"{run.min_clearance_km:.1f}"),
     ("planning [s]", lambda run: f"{run.timing_s.get('planning', 0.0):.1f}"),
@@ -55,6 +56,8 @@ class GuidanceRun:
     integrations: int = 0
     # Per guidance cycle arrays keyed by name, energy first, empty for open-loop strategies
     cycle_diagnostics: dict[str, np.ndarray] = field(default_factory=dict)
+    # 3DOF terminal miss of the open-loop plan before the shooting (km), NaN for closed-loop strategies
+    plan_miss_km: float = np.nan
 
     @property
     def miss_norm_km(self) -> float:
@@ -89,6 +92,7 @@ def from_shooting(name: str, shot: ShootingResult, timing_s: dict, reduced_paths
         timing_s=dict(timing_s),
         reduced_paths=reduced_paths,
         integrations=integrations,
+        plan_miss_km=float(shot.miss_history[0]),
     )
 
 

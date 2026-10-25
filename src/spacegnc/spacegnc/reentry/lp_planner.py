@@ -3,8 +3,8 @@
 The bank sign delta(e) = +-1 of the reduced model is relaxed to u_k in [-1, 1] held over K coarse energy
 cells, so u_k sin|sigma| is the lateral lift fraction. Heading is then linear in u,
     psi(S) = psi_b(S) + sum_k u_k int_{cell k, s < S} kappa ds,
-and the track is linearized about the current iterate,
-    dY = int cos(psi_ref) dpsi dS,  dX = -int sin(psi_ref) dpsi dS.
+and the crossrange is linearized about the current iterate with the downrange held at the reference,
+    dY = int cos(psi_ref) dpsi dS.
 Each round solves the LP
     min  w_y |Y_f| + w_psi |psi_f| + w_tv sum |u_k+1 - u_k| - w_bb sum sign(u_ref,k) u_k
     s.t. side_j (Y_i - Y_j) >= sqrt(R_j^2 - (X_i - X_j)^2) along every keep-out zone
@@ -34,6 +34,18 @@ LOG = create_logger(__name__)
 
 # Length unit of the LP rows (m per km)
 KILOMETER = 1e3
+
+
+@dataclass
+class TrackLinearization:
+    """Reference track of a relaxed bank sign on the energy samples and its sensitivities to every cell sign."""
+
+    downrange: np.ndarray
+    crossrange: np.ndarray
+    heading: np.ndarray
+    # d psi / d u_k and d Y / d u_k, one column per cell
+    heading_jacobian: np.ndarray
+    crossrange_jacobian: np.ndarray
 
 
 @dataclass
@@ -95,6 +107,11 @@ def cumulative_trapezoid_columns(values: np.ndarray, abscissa: np.ndarray) -> np
     """Cumulative trapezoidal integral of every column starting from zero."""
     increments = 0.5 * (values[1:] + values[:-1]) * np.diff(abscissa)[:, None]
     return np.vstack([np.zeros((1, values.shape[1])), np.cumsum(increments, axis=0)])
+
+
+def cell_of_samples(energy: np.ndarray, cell_edges: np.ndarray) -> np.ndarray:
+    """Energy cell index of every energy sample."""
+    return np.clip(np.searchsorted(cell_edges, energy, side="right") - 1, 0, cell_edges.size - 2)
 
 
 class LinearProgramReversalPlanner:
@@ -170,12 +187,27 @@ class LinearProgramReversalPlanner:
                 )
         return np.asarray(rows).reshape(-1, bank_sign.size), np.asarray(biases), np.asarray(zone_of_row, int), sides
 
-    def _solve_round(self, profile, cell_of_sample, curvature_columns, bank_sign, trust_radius, bang_bang_weight):
+    def linearize(self, profile: ArcProfile, cell_edges: np.ndarray, bank_sign: np.ndarray) -> TrackLinearization:
+        """Reduced path of a relaxed bank sign with its exact heading and linearized crossrange sensitivities."""
+        cell_of_sample = cell_of_samples(profile.energy, cell_edges)
+        downrange, crossrange, heading = self.relaxed_path(profile, cell_of_sample, bank_sign)
+        # d psi / d u_k on the sample grid, exact for the piecewise constant relaxed sign
+        masks = (cell_of_sample[:, None] == np.arange(self.cell_count)[None, :]).astype(float)
+        heading_jacobian = cumulative_trapezoid_columns(profile.curvature[:, None] * masks, profile.arc_length)
+        crossrange_jacobian = cumulative_trapezoid_columns(np.cos(heading)[:, None] * heading_jacobian, profile.arc_length)
+        return TrackLinearization(downrange, crossrange, heading, heading_jacobian, crossrange_jacobian)
+
+    def terminal_state(self, profile: ArcProfile, cell_edges: np.ndarray, bank_sign: np.ndarray) -> tuple[float, float]:
+        """Terminal crossrange (m) and heading (rad) of the reduced path of a relaxed bank sign."""
+        _, crossrange, heading = self.relaxed_path(profile, cell_of_samples(profile.energy, cell_edges), bank_sign)
+        return crossrange[-1], heading[-1]
+
+    def _solve_round(self, profile, cell_edges, bank_sign, trust_radius, bang_bang_weight):
         """One LP about the current relaxed bank sign, None when the interior point Newton system is singular."""
         cell_count = self.cell_count
-        downrange, crossrange, heading = self.relaxed_path(profile, cell_of_sample, bank_sign)
-        heading_jacobian = curvature_columns
-        crossrange_jacobian = cumulative_trapezoid_columns(np.cos(heading)[:, None] * heading_jacobian, profile.arc_length)
+        track = self.linearize(profile, cell_edges, bank_sign)
+        downrange, crossrange, heading = track.downrange, track.crossrange, track.heading
+        heading_jacobian, crossrange_jacobian = track.heading_jacobian, track.crossrange_jacobian
         zone_matrix, zone_bias, zone_of_row, sides = self._zone_rows(downrange, crossrange, crossrange_jacobian, bank_sign)
 
         # Variables [u (K), t (K - 1) >= |du|, s_y >= |Y_f| km, s_psi >= |psi_f| deg, c >= 0 common extra
@@ -246,12 +278,12 @@ class LinearProgramReversalPlanner:
             # The dense normal matrix can turn singular near a degenerate vertex, keep the current sign
             return None
         new_sign = np.clip(solution.original_primal[u_slice], -1, 1)
-        _, new_crossrange, new_heading = self.relaxed_path(profile, cell_of_sample, new_sign)
+        new_crossrange, new_heading = self.terminal_state(profile, cell_edges, new_sign)
         return ConvexificationRound(
             bank_sign=new_sign,
             sides=sides,
-            crossrange_miss_km=new_crossrange[-1] / KILOMETER,
-            final_heading_deg=float(np.degrees(new_heading[-1])),
+            crossrange_miss_km=new_crossrange / KILOMETER,
+            final_heading_deg=float(np.degrees(new_heading)),
             interior_point_iterations=solution.iterations,
             converged=solution.converged,
         )
@@ -259,31 +291,26 @@ class LinearProgramReversalPlanner:
     def solve_relaxed(self, profile: ArcProfile, initial_bank_sign: np.ndarray | None = None):
         """Sequential LP rounds on the relaxed bank sign, returning the cell edges and rounds."""
         cell_edges = np.linspace(profile.energy[0], profile.energy[-1], self.cell_count + 1)
-        cell_of_sample = np.clip(np.searchsorted(cell_edges, profile.energy, side="right") - 1, 0, self.cell_count - 1)
-        # d psi / d u_k on the sample grid, exact for the piecewise constant relaxed sign
-        masks = (cell_of_sample[:, None] == np.arange(self.cell_count)[None, :]).astype(float)
-        curvature_columns = cumulative_trapezoid_columns(profile.curvature[:, None] * masks, profile.arc_length)
 
         bank_sign = np.zeros(self.cell_count) if initial_bank_sign is None else np.asarray(initial_bank_sign, float)
         rounds = []
         for idx, trust_radius in enumerate(self.TRUST_RADII):
             # The first round has no sign to push toward, later rounds linearize -|u| about the iterate
             bang_bang_weight = 0.0 if idx == 0 else self.BANG_BANG_WEIGHT
-            round_result = self._solve_round(
-                profile, cell_of_sample, curvature_columns, bank_sign, trust_radius, bang_bang_weight
-            )
+            round_result = self._solve_round(profile, cell_edges, bank_sign, trust_radius, bang_bang_weight)
             if round_result is None:
                 LOG.warning(f"LP round {idx}: singular interior point system, stopping at the previous bank sign")
                 if not rounds:
-                    downrange, crossrange, heading = self.relaxed_path(profile, cell_of_sample, bank_sign)
+                    track = self.linearize(profile, cell_edges, bank_sign)
                     rounds.append(
                         ConvexificationRound(
                             bank_sign=bank_sign,
                             sides=[
-                                passage.side for passage in reduced_model.zone_passages(downrange, crossrange, self.zones)
+                                passage.side
+                                for passage in reduced_model.zone_passages(track.downrange, track.crossrange, self.zones)
                             ],
-                            crossrange_miss_km=crossrange[-1] / KILOMETER,
-                            final_heading_deg=float(np.degrees(heading[-1])),
+                            crossrange_miss_km=track.crossrange[-1] / KILOMETER,
+                            final_heading_deg=float(np.degrees(track.heading[-1])),
                             interior_point_iterations=0,
                             converged=False,
                         )
@@ -307,18 +334,28 @@ class LinearProgramReversalPlanner:
             profile, reversal_energies, initial_sign, self.downrange0, self.crossrange0, self.heading0
         )
 
+    def plan_path(self, bank_magnitude_deg: float, reversal_energies, initial_sign: int):
+        """Energy samples and path X, Y, psi of a +-1 bank sign plan, from the reduced model."""
+        profile = self.primitives.at(bank_magnitude_deg)
+        return (profile.energy, *self.reduced_path(profile, reversal_energies, initial_sign))
+
+    # Relative finite difference step and residual evaluation cap of the polishing least squares, None for
+    # the scipy defaults
+    POLISH_DIFF_STEP: float | None = None
+    POLISH_MAX_EVALUATIONS: int | None = None
+
     def polish(self, bank_magnitude_deg: float, reversal_energies: np.ndarray, initial_sign: int, iterations: int = 3):
-        """Alternate |sigma| for reduced X_f = 0 and least squares reversal energies for Y_f = 0, psi_f ~ 0."""
+        """Alternate |sigma| for X_f = 0 and least squares reversal energies for Y_f = 0, psi_f ~ 0 on plan_path."""
         energies = np.asarray(reversal_energies, dtype=float)
+        energy_span = self.primitives.at(bank_magnitude_deg).energy[[0, -1]]
         for _ in range(iterations):
-            profile = self.primitives.at(bank_magnitude_deg)
             if energies.size:
-                gaps = np.concatenate([[profile.energy[0]], energies, [profile.energy[-1]]])
+                gaps = np.concatenate([[energy_span[0]], energies, [energy_span[1]]])
                 lower = 0.5 * (gaps[:-2] + gaps[1:-1])
                 upper = 0.5 * (gaps[1:-1] + gaps[2:])
 
                 def residual(candidate):
-                    downrange, crossrange, heading = self.reduced_path(profile, candidate, initial_sign)
+                    _, downrange, crossrange, heading = self.plan_path(bank_magnitude_deg, candidate, initial_sign)
                     shortfall = [
                         self.CLEARANCE_PENALTY
                         * max(0.0, self.clearance_margin + self.ZONE_BUFFER - passage.clearance)
@@ -328,11 +365,16 @@ class LinearProgramReversalPlanner:
                     return np.array([crossrange[-1] / KILOMETER, np.degrees(heading[-1]) / 5.0, *shortfall])
 
                 energies = least_squares(
-                    residual, np.clip(energies, lower + 1, upper - 1), bounds=(lower, upper), x_scale=1e6
+                    residual,
+                    np.clip(energies, lower + 1, upper - 1),
+                    bounds=(lower, upper),
+                    x_scale=1e6,
+                    diff_step=self.POLISH_DIFF_STEP,
+                    max_nfev=self.POLISH_MAX_EVALUATIONS,
                 ).x
 
             def terminal_downrange(bank_deg):
-                return self.reduced_path(self.primitives.at(bank_deg), energies, initial_sign)[0][-1]
+                return self.plan_path(bank_deg, energies, initial_sign)[1][-1]
 
             try:
                 bank_magnitude_deg = brentq(
@@ -368,8 +410,7 @@ class LinearProgramReversalPlanner:
             f"e_k={np.round(extracted_energies / 1e6, 3)} MJ/kg"
         )
         bank_magnitude_deg, energies = self.polish(bank_magnitude_deg, extracted_energies, initial_sign)
-        profile = self.primitives.at(bank_magnitude_deg)
-        downrange, crossrange, heading = self.reduced_path(profile, energies, initial_sign)
+        energy, downrange, crossrange, heading = self.plan_path(bank_magnitude_deg, energies, initial_sign)
         passages = reduced_model.zone_passages(downrange, crossrange, self.zones)
         sides = [passage.side for passage in passages]
         feasible = bool(
@@ -378,7 +419,7 @@ class LinearProgramReversalPlanner:
             and abs(np.degrees(heading[-1])) < self.FINAL_HEADING_LIMIT_DEG
         )
         # Each reversal may move up to halfway toward its neighbours during the shooting
-        bounds = np.concatenate([[profile.energy[0]], energies, [profile.energy[-1]]])
+        bounds = np.concatenate([[energy[0]], energies, [energy[-1]]])
         windows = [
             (0.5 * (bounds[idx] + bounds[idx + 1]), 0.5 * (bounds[idx + 1] + bounds[idx + 2]))
             for idx in range(energies.size)
@@ -390,7 +431,7 @@ class LinearProgramReversalPlanner:
             gaps=list(range(energies.size)),
             sides=sides,
             windows=windows,
-            energy=profile.energy,
+            energy=energy,
             downrange=downrange,
             crossrange=crossrange,
             heading=heading,

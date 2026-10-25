@@ -114,8 +114,10 @@ class EntryVehicle3DOF(DynamicsModel):
             v (Earth-relative velocity in the target-centred frame, m/s)
         Control:
             sigma (bank angle, rad)
+            lift fraction (optional, 1 by default), scales the lift magnitude of a relaxed bank command
         """
         position, velocity, bank = state[:3], state[3:6], control[0]
+        lift_fraction = control[1] if len(control) > 1 else 1.0
         omega = self.frame.earth_rate_vector
         rho = self.frame.geocentric_position(position)
 
@@ -123,7 +125,7 @@ class EntryVehicle3DOF(DynamicsModel):
         lift, drag = self.aero_accelerations(navigation.altitude, navigation.mach, navigation.speed)
 
         acceleration = (
-            lift * self.lift_direction(position, velocity, bank)
+            lift_fraction * lift * self.lift_direction(position, velocity, bank)
             - drag * velocity / navigation.speed
             - self.mu * rho / np.linalg.norm(rho) ** 3
             - 2 * np.cross(omega, velocity)
