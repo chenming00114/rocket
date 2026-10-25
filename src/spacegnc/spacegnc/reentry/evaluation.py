@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
+from spacegnc.reentry.closed_loop import ClosedLoopFlight
 from spacegnc.reentry.planner import ZonePassage, side_label
 from spacegnc.reentry.predictor_corrector import ClosedLoopResult
 from spacegnc.reentry.shooting import MEGAJOULE, ShootingResult
@@ -124,14 +125,40 @@ def from_closed_loop(name: str, result: ClosedLoopResult, timing_s: dict, reduce
     )
 
 
-def summary_rows(runs: list[GuidanceRun]) -> list[list]:
+def from_flight(name: str, flight: ClosedLoopFlight, timing_s: dict) -> GuidanceRun:
+    """GuidanceRun of a ClosedLoopSimulator flight, with its per update schedules and compute time as diagnostics."""
+    cycles = flight.cycles
+    diagnostics = {
+        "energy": np.array([cycle.energy for cycle in cycles]),
+        "time": np.array([cycle.time for cycle in cycles]),
+        "bank_magnitude_deg": np.array([cycle.schedule.bank_magnitude_deg for cycle in cycles]),
+        "next_reversal": np.array([cycle.schedule.next_reversal for cycle in cycles]),
+        "predicted_miss_x_km": np.array([cycle.schedule.predicted_miss_km[0] for cycle in cycles]),
+        "predicted_miss_y_km": np.array([cycle.schedule.predicted_miss_km[1] for cycle in cycles]),
+        "bias_x_km": np.array([cycle.schedule.bias_km[0] for cycle in cycles]),
+        "bias_y_km": np.array([cycle.schedule.bias_km[1] for cycle in cycles]),
+        "compute_s": flight.compute_s,
+    }
+    return GuidanceRun(
+        name=name,
+        trajectory=flight.trajectory,
+        reversal_energies=np.asarray(flight.reversal_energies, dtype=float),
+        bank_magnitude_deg=cycles[-1].schedule.bank_magnitude_deg,
+        miss=np.asarray(flight.miss, dtype=float),
+        passages=flight.passages,
+        timing_s=dict(timing_s),
+        cycle_diagnostics=diagnostics,
+    )
+
+
+def summary_rows(runs: list[GuidanceRun], columns=SUMMARY_COLUMNS) -> list[list]:
     """Header and one row per run of the comparison table."""
-    return [[header for header, _ in SUMMARY_COLUMNS]] + [[getter(run) for _, getter in SUMMARY_COLUMNS] for run in runs]
+    return [[header for header, _ in columns]] + [[getter(run) for _, getter in columns] for run in runs]
 
 
-def write_summary(runs: list[GuidanceRun], output_dir: Path):
+def write_summary(runs: list[GuidanceRun], output_dir: Path, columns=SUMMARY_COLUMNS):
     """Write the comparison table as summary.csv and summary.md."""
-    rows = summary_rows(runs)
+    rows = summary_rows(runs, columns)
     with open(output_dir / "summary.csv", "w", newline="") as file:
         csv.writer(file).writerows(rows)
     lines = ["| " + " | ".join(str(cell) for cell in row) + " |" for row in rows]

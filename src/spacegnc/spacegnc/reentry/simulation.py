@@ -103,21 +103,27 @@ class BankReversalSimulator:
         reversal_energies,
         initial_sign: int,
         stop_energy: float,
+        stop_time: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, str]:
-        """Integrate [state, bank] from time0 until the stop energy, the terminal energy or a limit event.
+        """Integrate [state, bank] from time0 until the stop energy or time, the terminal energy or a limit event.
 
         The bank command starts at initial_sign |sigma| and flips at every reversal energy passed.
         Returns the time, augmented state history and the status, which is None when only the stop
-        energy short of the terminal energy was reached.
+        energy short of the terminal energy or the stop time was reached.
         """
         bank_magnitude = np.radians(bank_magnitude_deg)
         reversal_energies = np.sort(np.asarray(reversal_energies, dtype=float))
         return self._integrate(
-            self._state_equation, augmented_state0, time0, (bank_magnitude, reversal_energies, initial_sign), stop_energy
+            self._state_equation,
+            augmented_state0,
+            time0,
+            (bank_magnitude, reversal_energies, initial_sign),
+            stop_energy,
+            stop_time,
         )
 
-    def _integrate(self, state_equation, state0: np.ndarray, time0: float, args: tuple, stop_energy: float):
-        """Integrate a state starting with [r, v] from time0 until the stop energy, the terminal energy or a limit event."""
+    def _integrate(self, state_equation, state0: np.ndarray, time0: float, args: tuple, stop_energy: float, stop_time=None):
+        """Integrate a state starting with [r, v] from time0 to the stop energy or time, or a terminal event."""
         stop_energy = min(stop_energy, self.terminal_energy)
         frame = self.dynamics.frame
 
@@ -139,7 +145,7 @@ class BankReversalSimulator:
 
         solution = solve_ivp(
             state_equation,
-            (time0, self.MAX_DURATION),
+            (time0, self.MAX_DURATION if stop_time is None else min(stop_time, self.MAX_DURATION)),
             np.asarray(state0, dtype=float),
             args=args,
             method="RK45",
@@ -150,7 +156,9 @@ class BankReversalSimulator:
         )
         stop_status = TERMINAL_ENERGY_STATUS if stop_energy >= self.terminal_energy else None
         event_status = (stop_status, ALTITUDE_FLOOR_STATUS, SKIP_OUT_STATUS)
-        status = next((label for label, events in zip(event_status, solution.t_events) if len(events)), TIMEOUT_STATUS)
+        # Reaching a stop time short of the maximum duration ends the segment without a status
+        end_status = TIMEOUT_STATUS if stop_time is None or stop_time >= self.MAX_DURATION else None
+        status = next((label for label, events in zip(event_status, solution.t_events) if len(events)), end_status)
         return solution.t, solution.y.T, status
 
     def _relaxed_state_equation(self, time, state, bank, lift_fraction):
