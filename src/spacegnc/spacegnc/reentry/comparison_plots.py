@@ -133,6 +133,37 @@ def plot_bank_vs_time(runs: list[GuidanceRun], path: Path | None = None):
     return _finish(fig, path)
 
 
+def plot_constraint_history(runs: list[GuidanceRun], path: Path | None = None):
+    """Dynamic pressure, stagnation heat rate, load factor and heat load of the flown trajectories against time."""
+    fig, axs = plt.subplots(2, 2, figsize=(13, 8), sharex=True)
+    for idx, run in enumerate(runs):
+        trajectory = run.trajectory
+        heat_load = np.concatenate(
+            [[0.0], np.cumsum(0.5 * (trajectory.heat_rate[1:] + trajectory.heat_rate[:-1]) * np.diff(trajectory.time))]
+        )
+        series = (
+            (axs[0, 0], trajectory.dynamic_pressure / 1e3),
+            (axs[0, 1], trajectory.heat_rate / 1e3),
+            (axs[1, 0], trajectory.load_factor),
+            (axs[1, 1], heat_load / 1e6),
+        )
+        for ax, values in series:
+            ax.plot(trajectory.time, values, lw=1.4, label=run.name, **style(idx))
+    labels = (
+        "Dynamic pressure q [kPa]",
+        "Stagnation heat rate [kW/m²] (Sutton-Graves)",
+        "Load factor [g]",
+        "Heat load [MJ/m²]",
+    )
+    for ax, label in zip(axs.flat, labels):
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.3)
+    for ax in axs[1]:
+        ax.set_xlabel("Time t [s]")
+    axs[0, 0].legend(fontsize=8)
+    return _finish(fig, path)
+
+
 def plot_state_vs_energy(runs: list[GuidanceRun], path: Path | None = None):
     """Altitude, speed, heading and crossrange of the flown trajectories against specific energy."""
     fig, axs = plt.subplots(2, 2, figsize=(13, 8), sharex=True)

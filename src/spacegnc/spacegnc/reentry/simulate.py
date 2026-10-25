@@ -32,7 +32,6 @@ from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmo
 LOG = create_logger(__name__)
 
 KILOMETER = 1e3
-STANDARD_GRAVITY = 9.80665
 
 
 def nominal_shot(case: ComparisonCase):
@@ -81,7 +80,7 @@ STRATEGIES = {
 
 def peak_load(run: GuidanceRun) -> float:
     """Peak aerodynamic load |L + D| / g0 of the flown trajectory."""
-    return float(np.max(np.hypot(run.trajectory.lift, run.trajectory.drag)) / STANDARD_GRAVITY)
+    return float(np.max(run.trajectory.load_factor))
 
 
 def compute_stat(run: GuidanceRun, reduce) -> float:
@@ -104,6 +103,9 @@ CLOSED_LOOP_COLUMNS = (
     ("V_f [m/s]", lambda run: f"{run.trajectory.speed[-1]:.0f}"),
     ("psi_f [deg]", lambda run: f"{np.degrees(run.trajectory.heading[-1]):.2f}"),
     ("peak load [g]", lambda run: f"{peak_load(run):.2f}"),
+    ("peak q [kPa]", lambda run: f"{np.max(run.trajectory.dynamic_pressure) / 1e3:.1f}"),
+    ("peak heat rate [kW/m^2]", lambda run: f"{np.max(run.trajectory.heat_rate) / 1e3:.0f}"),
+    ("heat load [MJ/m^2]", lambda run: f"{run.trajectory.heat_load / 1e6:.1f}"),
     ("cycles", lambda run: run.cycle_diagnostics["compute_s"].size),
     ("mean cycle [s]", lambda run: f"{compute_stat(run, np.mean):.3f}"),
     ("max cycle [s]", lambda run: f"{compute_stat(run, np.max):.3f}"),
@@ -137,6 +139,7 @@ def write_plots(runs: list[GuidanceRun], scenario: ReentryScenario, output_dir: 
         comparison_plots.plot_bank_vs_time(runs, output_dir / f"bank_vs_time_{suffix}.png"),
         comparison_plots.plot_state_vs_energy(runs, output_dir / f"state_vs_energy_{suffix}.png"),
         comparison_plots.plot_performance(runs, output_dir / f"performance_{suffix}.png"),
+        comparison_plots.plot_constraint_history(runs, output_dir / f"constraints_{suffix}.png"),
         comparison_plots.plot_cycle_diagnostics(runs, output_dir / f"cycle_diagnostics_{suffix}.png"),
     ]
     for figure in figures:

@@ -85,6 +85,44 @@ class PerfectNavigation:
 
 
 @dataclass
+class NavigationErrors:
+    """Altitude and speed bias and white noise of a navigation error model, off when all are zero."""
+
+    # Altitude bias and noise standard deviation (m)
+    altitude_bias: float = 0.0
+    altitude_noise: float = 0.0
+    # Earth-relative speed bias and noise standard deviation (m/s)
+    speed_bias: float = 0.0
+    speed_noise: float = 0.0
+    seed: int = 0
+
+
+class ErroneousNavigation(PerfectNavigation):
+    """Navigation of a truth state moved radially by the altitude error and scaled along v by the speed error.
+
+    Every navigated quantity is derived from the one perturbed state, so position, energy and the
+    planner states stay consistent with each other. Noise is drawn once per guidance update.
+    """
+
+    def __init__(self, dynamics, errors: NavigationErrors):
+        """Initialize with the nominal entry dynamics and the error model."""
+        super().__init__(dynamics)
+        self.errors = errors
+        self.rng = np.random.default_rng(errors.seed)
+
+    def navigate(self, time: float, augmented_state: np.ndarray, bank_sign: int) -> Navigation:
+        """Navigation of the truth state with the altitude and speed errors applied."""
+        errors, frame = self.errors, self.dynamics.frame
+        position, velocity = np.asarray(augmented_state[:3], float), np.asarray(augmented_state[3:6], float)
+        rho = frame.geocentric_position(position)
+        altitude_error = errors.altitude_bias + errors.altitude_noise * self.rng.standard_normal()
+        speed_error = errors.speed_bias + errors.speed_noise * self.rng.standard_normal()
+        position = position + altitude_error * rho / np.linalg.norm(rho)
+        velocity = velocity * (1 + speed_error / np.linalg.norm(velocity))
+        return super().navigate(time, np.concatenate([position, velocity, augmented_state[6:]]), bank_sign)
+
+
+@dataclass
 class BankSchedule:
     """Bank command of one guidance update, flown until the next one."""
 
@@ -165,7 +203,7 @@ class ClosedLoopSimulator:
     def fly(self, guidance: Guidance) -> ClosedLoopFlight:
         """Fly from the plant's entry state to the terminal energy or a limit event."""
         plant, cycles, reversals = self.plant, [], []
-        time, augmented_state = 0.0, np.append(plant.initial_state, 0.0)
+        time, augmented_state = 0.0, plant.initial_augmented_state(0.0)
         schedule = self._update(guidance, self.navigation.navigate(time, augmented_state, 0), cycles)
         bank_sign = initial_sign = schedule.bank_sign
         # The entry starts at the first commanded bank
