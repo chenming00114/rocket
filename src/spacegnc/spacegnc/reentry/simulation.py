@@ -80,6 +80,8 @@ class BankReversalSimulator:
     # Simulation limits
     MAX_DURATION: float = 6000.0
     ALTITUDE_FLOOR: float = 15e3
+    # Relative integration tolerance, guidance predictions may loosen it on their own instance
+    RELATIVE_TOLERANCE: float = 1e-8
     SKIP_OUT_ALTITUDE: float = 140e3
 
     def __init__(
@@ -146,6 +148,23 @@ class BankReversalSimulator:
             stop_time,
         )
 
+    def _bank_law_state_equation(self, time, augmented_state, bank_law):
+        """Entry dynamics flying a state feedback bank command directly, the bank state is left unchanged."""
+        state = augmented_state[:6]
+        state_rate = self.dynamics.continuous_time_state_equation(time, state, np.array([bank_law(state)]))
+        return np.append(state_rate, 0.0)
+
+    def run_bank_law(
+        self, augmented_state0: np.ndarray, time0: float, bank_law, stop_energy: float
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """Integrate [state, bank] from time0 flying the bank bank_law([r, v]) (rad) without the rate limit.
+
+        A guidance prediction, the bank tracking is left out since its fast time constant would hold the
+        integration step to a fraction of a second. Returns the time, augmented state history and the
+        status like run_segment, with the bank column held at the initial bank.
+        """
+        return self._integrate(self._bank_law_state_equation, augmented_state0, time0, (bank_law,), stop_energy)
+
     def _integrate(self, state_equation, state0: np.ndarray, time0: float, args: tuple, stop_energy: float, stop_time=None):
         """Integrate a state starting with [r, v] from time0 to the stop energy or time, or a terminal event."""
         stop_energy = min(stop_energy, self.terminal_energy)
@@ -173,7 +192,7 @@ class BankReversalSimulator:
             np.asarray(state0, dtype=float),
             args=args,
             method="RK45",
-            rtol=1e-8,
+            rtol=self.RELATIVE_TOLERANCE,
             atol=1e-6,
             max_step=self.max_step,
             events=[stop_energy_event, altitude_floor_event, skip_out_event],

@@ -28,6 +28,7 @@ from spacegnc.reentry.scenario import ReentryScenario
 from spacegnc.reentry.shooting import MEGAJOULE, shoot
 from spacegnc.reentry.simulation import BankReversalSimulator
 from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmosphere
+from spacegnc.reentry.vertical_lift import VerticalLiftGuidance
 
 LOG = create_logger(__name__)
 
@@ -70,11 +71,17 @@ def predictor_corrector(case: ComparisonCase, options, bias_correction: bool = T
     return PredictorCorrectorAdapter(guidance, case.simulator, case.initial_bank_deg)
 
 
+def vertical_lift(case: ComparisonCase, options) -> VerticalLiftGuidance:
+    """Vertical L/D rooted for the downrange in nominal 3DOF every update, reversals at a crossrange deadband."""
+    return VerticalLiftGuidance(case.simulator, case.initial_bank_deg)
+
+
 STRATEGIES = {
     "lp-open-loop": open_loop_plan,
     "lp-closed-loop": closed_loop_linear_program,
     "pc-bias": predictor_corrector,
     "pc": functools.partial(predictor_corrector, bias_correction=False),
+    "vertical-ld": vertical_lift,
 }
 
 
