@@ -28,6 +28,7 @@ from spacegnc.reentry.scenario import ReentryScenario
 from spacegnc.reentry.shooting import MEGAJOULE, shoot
 from spacegnc.reentry.simulation import BankReversalSimulator
 from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmosphere
+from spacegnc.reentry.truth_model import TruthEntryVehicle3DOF, TruthModelConfig
 
 LOG = create_logger(__name__)
 
@@ -47,14 +48,29 @@ def open_loop_plan(case: ComparisonCase, options) -> OpenLoopPlanGuidance:
     return OpenLoopPlanGuidance.from_shooting(nominal_shot(case))
 
 
-def closed_loop_linear_program(case: ComparisonCase, options) -> ArcLinearProgramGuidance:
-    """Arc LP re-planned from the navigated state and re-shot in nominal 3DOF every update."""
+def guidance_simulator(case: ComparisonCase, gravity: str = "spherical") -> BankReversalSimulator:
+    """Guidance-side 3DOF simulator on the nominal atmosphere and aero, with point-mass or J2 gravity.
+
+    J2 reuses the truth model's zonal gravity about the spin axis with everything else nominal, so the
+    shooting sees the oblateness the truth flies while the altitude stays spherical.
+    """
+    nominal = case.simulator
+    if gravity == "spherical":
+        return nominal
+    dynamics = TruthEntryVehicle3DOF(nominal.dynamics, TruthModelConfig(gravity=gravity))
+    return BankReversalSimulator(
+        dynamics, nominal.initial_state, nominal.terminal_energy, np.degrees(nominal.bank_rate), nominal.max_step
+    )
+
+
+def closed_loop_linear_program(case: ComparisonCase, options, gravity: str = "spherical") -> ArcLinearProgramGuidance:
+    """Arc LP re-planned from the navigated state and re-shot in guidance 3DOF every update."""
     scenario = case.scenario
     return ArcLinearProgramGuidance(
         case.primitives,
         scenario.keep_out_zones,
         scenario.clearance_margin,
-        case.simulator,
+        guidance_simulator(case, gravity),
         case.initial_bank_deg,
         replan_interval=options.replan_interval,
         shooting=not options.no_reshoot,
@@ -73,6 +89,7 @@ def predictor_corrector(case: ComparisonCase, options, bias_correction: bool = T
 STRATEGIES = {
     "lp-open-loop": open_loop_plan,
     "lp-closed-loop": closed_loop_linear_program,
+    "lp-closed-loop-j2": functools.partial(closed_loop_linear_program, gravity="j2"),
     "pc-bias": predictor_corrector,
     "pc": functools.partial(predictor_corrector, bias_correction=False),
 }

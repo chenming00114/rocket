@@ -1,13 +1,17 @@
 """Test the truth atmosphere and the closed-loop simulation platform of the example case."""
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from spacegnc.reentry.closed_loop import ClosedLoopSimulator
 from spacegnc.reentry.evaluation import from_flight
 from spacegnc.reentry.guidance_adapters import OpenLoopPlanGuidance, reversal_windows
 from spacegnc.reentry.scenario import ReentryScenario
+from spacegnc.reentry.simulate import STRATEGIES, guidance_simulator
 from spacegnc.reentry.simulation import TERMINAL_ENERGY_STATUS, BankReversalSimulator
 from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmosphere
+from spacegnc.reentry.truth_model import j2_gravity
 
 
 def build_simulator(density_scale: float = 1.0) -> BankReversalSimulator:
@@ -59,3 +63,16 @@ def test_reversal_windows_are_halfway_to_the_neighbours():
     """Test the shooting windows split the energy between the current, reversal and terminal energies."""
     windows = reversal_windows(np.array([20.0, 40.0]), 10.0, 60.0)
     assert windows == [(15.0, 30.0), (30.0, 50.0)]
+
+
+def test_j2_guidance_simulator_shifts_the_point_mass_shot_a_little():
+    """Test the J2 guidance 3DOF keeps the nominal model but the zonal gravity, and moves the same schedule by tens of km."""
+    nominal = build_simulator()
+    simulator = guidance_simulator(SimpleNamespace(simulator=nominal), gravity="j2")
+    assert guidance_simulator(SimpleNamespace(simulator=nominal)) is nominal
+    rho = nominal.dynamics.frame.geocentric_position(nominal.initial_state[:3])
+    assert np.allclose(simulator.dynamics.gravity(rho), j2_gravity(rho, simulator.dynamics.pole, nominal.dynamics.mu))
+    point_mass, oblate = (sim.run(50.0, reversal_energies=[40e6, 55e6], initial_sign=1) for sim in (nominal, simulator))
+    shift = np.hypot(oblate.downrange[-1] - point_mass.downrange[-1], oblate.crossrange[-1] - point_mass.crossrange[-1])
+    assert 1e3 < shift < 200e3
+    assert "lp-closed-loop-j2" in STRATEGIES
