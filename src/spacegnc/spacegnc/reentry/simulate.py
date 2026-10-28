@@ -28,6 +28,7 @@ from spacegnc.reentry.scenario import ReentryScenario
 from spacegnc.reentry.shooting import MEGAJOULE, shoot
 from spacegnc.reentry.simulation import BankReversalSimulator
 from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmosphere
+from spacegnc.reentry.truth_model import TruthEntryVehicle3DOF, TruthModelConfig
 
 LOG = create_logger(__name__)
 
@@ -47,14 +48,34 @@ def open_loop_plan(case: ComparisonCase, options) -> OpenLoopPlanGuidance:
     return OpenLoopPlanGuidance.from_shooting(nominal_shot(case))
 
 
-def closed_loop_linear_program(case: ComparisonCase, options) -> ArcLinearProgramGuidance:
-    """Arc LP re-planned from the navigated state and re-shot in nominal 3DOF every update."""
+def guidance_simulator(case: ComparisonCase, altitude: str = "spherical") -> BankReversalSimulator:
+    """Guidance-side 3DOF simulator on the nominal atmosphere and aero, at spherical or geodetic altitude.
+
+    Geodetic reuses the truth model's WGS-84 altitude for the atmosphere lookup that feeds the density, Mach
+    and aero, with everything else nominal. Navigation provides the geodetic altitude, and the prediction
+    starts from the navigated position, so the first lookup is the navigated geodetic altitude and the rest
+    follow the predicted position.
+    """
+    nominal = case.simulator
+    if altitude == "spherical":
+        return nominal
+    dynamics = TruthEntryVehicle3DOF(nominal.dynamics, TruthModelConfig(altitude=altitude))
+    return BankReversalSimulator(
+        dynamics, nominal.initial_state, nominal.terminal_energy, np.degrees(nominal.bank_rate), nominal.max_step
+    )
+
+
+def closed_loop_linear_program(case: ComparisonCase, options, altitude: str = "spherical") -> ArcLinearProgramGuidance:
+    """Arc LP re-planned from the navigated state and re-shot in guidance 3DOF every update.
+
+    The arc primitives stay the offline nominal ones, the re-shooting corrects the plan in the guidance 3DOF.
+    """
     scenario = case.scenario
     return ArcLinearProgramGuidance(
         case.primitives,
         scenario.keep_out_zones,
         scenario.clearance_margin,
-        case.simulator,
+        guidance_simulator(case, altitude),
         case.initial_bank_deg,
         replan_interval=options.replan_interval,
         shooting=not options.no_reshoot,
@@ -73,6 +94,7 @@ def predictor_corrector(case: ComparisonCase, options, bias_correction: bool = T
 STRATEGIES = {
     "lp-open-loop": open_loop_plan,
     "lp-closed-loop": closed_loop_linear_program,
+    "lp-closed-loop-geodetic": functools.partial(closed_loop_linear_program, altitude="geodetic"),
     "pc-bias": predictor_corrector,
     "pc": functools.partial(predictor_corrector, bias_correction=False),
 }

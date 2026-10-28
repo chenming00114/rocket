@@ -1,13 +1,17 @@
 """Test the truth atmosphere and the closed-loop simulation platform of the example case."""
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from spacegnc.reentry.closed_loop import ClosedLoopSimulator
 from spacegnc.reentry.evaluation import from_flight
 from spacegnc.reentry.guidance_adapters import OpenLoopPlanGuidance, reversal_windows
 from spacegnc.reentry.scenario import ReentryScenario
+from spacegnc.reentry.simulate import STRATEGIES, guidance_simulator
 from spacegnc.reentry.simulation import TERMINAL_ENERGY_STATUS, BankReversalSimulator
 from spacegnc.reentry.truth_atmosphere import ScaledDensityAtmosphere, with_atmosphere
+from spacegnc.reentry.truth_model import geodetic_altitude
 
 
 def build_simulator(density_scale: float = 1.0) -> BankReversalSimulator:
@@ -59,3 +63,18 @@ def test_reversal_windows_are_halfway_to_the_neighbours():
     """Test the shooting windows split the energy between the current, reversal and terminal energies."""
     windows = reversal_windows(np.array([20.0, 40.0]), 10.0, 60.0)
     assert windows == [(15.0, 30.0), (30.0, 50.0)]
+
+
+def test_geodetic_guidance_simulator_looks_up_the_atmosphere_at_the_geodetic_altitude():
+    """Test the geodetic guidance 3DOF keeps the nominal model but looks up the atmosphere at the WGS-84 altitude."""
+    nominal = build_simulator()
+    simulator = guidance_simulator(SimpleNamespace(simulator=nominal), altitude="geodetic")
+    assert guidance_simulator(SimpleNamespace(simulator=nominal)) is nominal
+    state = nominal.initial_state
+    rho = nominal.dynamics.frame.geocentric_position(state[:3])
+    spherical = np.linalg.norm(rho) - nominal.dynamics.frame.target_radius
+    aero = simulator.dynamics.flown_aero(state)
+    assert aero.altitude == geodetic_altitude(rho, simulator.dynamics.pole)
+    assert abs(aero.altitude - spherical) > 1e3
+    assert np.isclose(aero.density, nominal.dynamics.atmosphere.density(aero.altitude))
+    assert "lp-closed-loop-geodetic" in STRATEGIES
